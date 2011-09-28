@@ -1,9 +1,6 @@
 /* 
-
 Copyright 2011 Bjørn Mork <bjorn@mork.no>
-
 License: GPLv2
-
 */
 
 #include <stdlib.h>
@@ -13,7 +10,7 @@ License: GPLv2
 #include <stdarg.h>
 #include <fcntl.h>
 #include <errno.h>
-
+#include <termios.h>
 
 /* default values for options */
 static char *supported[] = { "0bdb:1900", NULL };
@@ -58,7 +55,7 @@ char *wwan_getgpsport(void)
 
 char *wwan_getmgmt(void)
 {
-	return "/dev/ttyACM0";
+	return "/dev/ttyACM1";
 }
 
 int wwan_verify_pin(void)
@@ -97,12 +94,12 @@ int wwan_disconnect(void)
 }
 
 
-
 int main (int argc, char **argv)
 {
 	int mgmt_fd;
 	ssize_t n, c;
 	char buf[512], *p;
+	struct termios t;
 
 	if (argc != 1)
 		fatal("usage: %s gps|start|stop\n", argv[0]);
@@ -110,11 +107,17 @@ int main (int argc, char **argv)
         if ((mgmt_fd = open(wwan_getmgmt(),  O_RDWR|O_SYNC)) < 0)
                 fatal("failed to open '%s': %d %m\n", wwan_getmgmt(), errno);
 
+	tcgetattr(mgmt_fd, &t);
+	t.c_lflag &= ~(ICANON | ECHO);
+	tcsetattr(mgmt_fd, TCSADRAIN, &t);
+
 	sprintf(buf, "%s", "ATI\r\n");
 	write(mgmt_fd, buf, strlen(buf));
 	p = buf;
 	c = 0;
 	while (n = read(mgmt_fd, p, sizeof(buf) - c)) {
+		p[n] = 0;
+		fprintf(stderr, "%s", p);
 		p += n;
 		c += n;
 	}
