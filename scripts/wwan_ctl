@@ -1,5 +1,4 @@
 #!/bin/bash
-# $Id: wwan_ctl,v 1.12 2011-09-29 12:31:32 bjorn Exp $
 
 #####################################################################
 ## Purpose
@@ -8,7 +7,7 @@
 # manage interfaces on WWAN cards like Ericsson F3507g
 #####################################################################
 
-# Copyright (C) 2009 Bjørn Mork <bjorn@mork.no>
+# Copyright (C) 2009,2011 Bjørn Mork <bjorn@mork.no>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -282,6 +281,15 @@ wwan_verify_pin () {
 
 wwan_enable_gps () {
     [ -n "$WWAN_GPSTTY" ] || return 3
+
+    # get sane tty settings from pppd(!)
+    stty min 1 time 0 \
+	-parenb -parodd cs8 -hupcl -cstopb cread clocal -crtscts \
+	ignbrk -brkint ignpar -parmrk -inpck -istrip -inlcr -igncr -icrnl -ixon -ixoff -iuclc -ixany -imaxbel -iutf8 \
+	-opost -olcuc -ocrnl -onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0 \
+	-isig -icanon -iexten -echo -echoe -echok -echonl -noflsh -xcase -tostop -echoprt -echoctl -echoke \
+	115200 -F /dev/$WWAN_GPSTTY
+
     echo -e "AT*E2GPSCTL=1,3,1\r" >$MGMT
     while read x; do
         # strip \r's so we can use this for output
@@ -655,6 +663,11 @@ wwan_disconnect () {
 ## How do we know?
 ##
 ## Let's make it a configuration issue while we're thinkin
+
+    # remove the GPS device from gpsd 
+    if [ "$WWAN_POWEROFF" == "1" -a -n "$WWAN_GPSTTY" ]; then
+	/lib/udev/gpsd.hotplug remove /dev/$WWAN_GPSTTY
+    fi
 
     # Note:  we may have to flush a bit here
     local TMOUT=1
