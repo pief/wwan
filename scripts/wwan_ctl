@@ -1,0 +1,776 @@
+#!/bin/bash
+# $Id: wwan_ctl,v 1.12 2011-09-29 12:31:32 bjorn Exp $
+
+#####################################################################
+## Purpose
+# This file is executed by ifupdown in pre-up and post-down phases of
+# network interface configuration. It allows ifup(8), and ifdown(8) to
+# manage interfaces on WWAN cards like Ericsson F3507g
+#####################################################################
+
+# Copyright (C) 2009 Bjørn Mork <bjorn@mork.no>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# On Debian GNU/Linux systems, the text of the GPL license can be
+# found in /usr/share/common-licenses/GPL.
+
+
+# Most of the commands in this script are documented in 
+# Sony Ericsson Doc. No. 1206-6103.8 titled 
+# "AT commands for Sony Ericsson phones"
+# available for download from http://www.sonyericsson.com/developer
+
+
+##FIXME:  should use AT&F to have control of the reported error messages
+##FIXME:  maybe use AT+CMEE=1 and get more specific error codes?
+##  example:
+##    AT*E2NAP=1
+##    +CME ERROR: 263
+##    AT&F
+##    OK
+##    AT*E2NAP=1
+##    ERROR
+##   note the need to identify "+CME ERROR: *" as "ERROR"
+
+
+## This one is also interesting:
+## AT+CEER
+## +CEER: Detach Cause: GMM10 (Implicitly detached)
+## 
+## OK
+
+## Defaults which can be changed globally in /etc/default/wwan_ctl
+## or locally per interface in /etc/network/interfaces
+
+## List of supported VID:PID values
+SUPPORTED="0bdb:1900"
+
+## Timeout for the read commands
+TMOUT=10
+
+## Access Point Name
+## Documented by Ericsson as
+##<APN>: Access Point Name – a string parameter which is a logical name, used to
+##       select the GGSN or the external packet data network.
+##       If the value is null or omitted, then the subscription value will be requested.
+##
+## Note that this can be overriden on a per-interface basis by setting wwan_apn
+## in /etc/network/interfaces
+WWAN_APN="" 
+
+## Whether to power off radio when interface goes down
+## Note:  Do not set this if you use the GPS
+WWAN_POWEROFF=1
+
+## Maunally overriding GPS port
+WWAN_GPSTTY=""
+
+## Radio mode 1=auto, 5=GSM, 6=UTRAN
+WWAN_MODE=1
+
+## Disallow roaming by default
+WWAN_ROAMING_OK=0
+
+### for script testing:
+WWAN_DEBUG=0
+
+
+# source a configuration file to allow some settings, like e.g SIM PIN
+# code or APN, to be configured in a common place
+if [ -r /etc/default/wwan_ctl ]; then
+    . /etc/default/wwan_ctl
+fi
+
+if [ $WWAN_DEBUG -ge 2 ]; then
+    set -x
+fi
+
+
+wwan_checkdevice () {
+    ## FIXME: Is readlink available?  There's an implementation in
+    ## /etc/init.d/ifupdown if not...
+
+    # get the usb device and vid:pid
+    if [ -n "$IFACE" ]; then
+	XCLASSDEV="/class/net/$IFACE"
+    else 
+	if [ -n "$WWAN_GPSTTY" ]; then
+	    XCLASSDEV="/class/tty/$WWAN_GPSTTY"
+	else
+	    return 1
+	fi
+    fi
+    USBDEV=`readlink -f /sys$XCLASSDEV/device/..`
+    if [ -f "$USBDEV/idVendor" -a -f "$USBDEV/idProduct" ]; then
+	VP=`cat $USBDEV/idVendor`:`cat $USBDEV/idProduct`
+    else
+    # just ignore any non-USB device
+	return 1
+    fi
+
+    # check if the device is known to be supported
+    for x in "$SUPPORTED"; do
+	[ "$VP" = "$x" ] && return 0
+    done
+
+    # unsupported card - consider setting SUPPORTED in /etc/default/wwan_ctl 
+    return 1
+}
+
+## search for the GPS port by simply grepping for it and testing with wwan_checkdevice()
+wwan_getgpsport () {
+    # try the configured value first, if any
+    [ -n "$WWAN_GPSTTY" ] && wwan_checkdevice && return 0
+    for f in `grep -l GPS /sys/class/{tty/*,tty:*}/device/interface 2>/dev/null`; do
+	WWAN_GPSTTY=`dirname \`dirname $f\`|sed -e 's/.*[:/]//'`
+	wwan_checkdevice && return 0
+    done
+    # no GPS port found
+    WWAN_GPSTTY=""
+    return 1
+}
+
+wwan_getmgmt () {
+
+    # get the list of possible managment devices:
+    #
+    # We implement standard(?) serial port locking
+    remove_lock () {
+	rm $LOCK
+    }
+
+    # We have a lockup problem with cdc-wdm devices in Linux 3.0
+    ver=`uname -r`
+    if [ ${ver%%-*} \> "2.6.32" ]; then
+	echo "Enabling workaround for cdc-wdm problems in Linux $ver"
+	ttys=tty
+    else
+	ttys="{usb,tty}"
+    fi
+
+    for d in $USBDEV/*/$ttys/* $USBDEV/*/$ttys:*; do if [ -e $d ]; then 
+	dev=`basename $d | sed -e 's/.*://'`
+	echo "trying $dev"
+	LOCK="/var/lock/LCK..$dev"
+	if [ ! -e $LOCK ]; then
+	    touch $LOCK
+	    MGMT="/dev/$dev"
+	    trap remove_lock EXIT
+	    break
+	else
+	    echo "Device /dev/$dev is locked."
+	fi
+    fi; done
+    desc=${IFACE:-GPS}
+    if [ -z "$MGMT" ]; then
+	echo "Cannot locate a management device for $desc"
+	exit 1
+    fi
+
+    # setting mode may fix things a bit - these settings come from pppd...
+    # NOTE: this fails with "Inappropriate ioctl for device" on cdc-wdm device
+    #       as expected.  Ignore that.
+    stty min 1 time 0 \
+	-parenb -parodd cs8 -hupcl -cstopb cread clocal -crtscts \
+	ignbrk -brkint ignpar -parmrk -inpck -istrip -inlcr -igncr -icrnl -ixon -ixoff -iuclc -ixany -imaxbel -iutf8 \
+	-opost -olcuc -ocrnl -onlcr -onocr -onlret -ofill -ofdel nl0 cr0 tab0 bs0 vt0 ff0 \
+	-isig -icanon -iexten -echo -echoe -echok -echonl -noflsh -xcase -tostop -echoprt -echoctl -echoke \
+	115200 -F $MGMT   2>/dev/null
+
+    echo "Selected $MGMT for management of $desc"
+
+}
+
+
+##
+wwan_verify_pin () {
+    # wait for card to get ready with short timeout
+    local TMOUT=1
+    while read x; do
+	case "$x" in
+	    \*EMRDY:*)
+		if [ ${x#\*EMRDY: } -ne 1 ]; then
+		    echo "Unknown state: $x"
+		else
+		    echo "Card is ready for commands"
+		fi
+		;;
+	    *)
+		;;
+	esac
+    done <$MGMT
+    
+    local TMOUT=5
+    pinsent="xxxx"
+    echo -e "AT+CPIN?\r" >$MGMT
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+            +CPIN:*)
+		status=${x#+CPIN: }
+		;;
+            OK)
+		case "$status" in
+                    READY)
+			return 0
+			;;
+                    SIM\ PIN)
+			if [ "$pinsent" == "$WWAN_PIN" ]; then
+			    echo "Refusing to enter the same PIN code twice!"
+			    status="pinsent"
+			else if [ -n "$WWAN_PIN" ]; then
+                            echo -e "AT+CPIN=\"$WWAN_PIN\"\r" >$MGMT
+			    status="pinsent"
+			    pinsent=$WWAN_PIN
+			    # give the card a chance to process the PIN before continuing...
+			    sleep 1
+			else
+                            echo "SIM PIN code requested, but none configured"
+			    return 3
+			fi; fi
+			;;
+		    pinsent)
+			echo -e "AT+CPIN?\r" >$MGMT
+			;;
+		    PH-SIM\ PIN)
+			# FIMXE: What is this?  It's reported if
+			# requesting AT+CPIN? immediately after
+			# entering the PIN CODE
+			# sleep and retry (global timeout applies)
+			sleep 1
+			echo -e "AT+CPIN?\r" >$MGMT
+			;;
+		    *)
+                        # don't get by leftover OKs...
+			if [ -n "$status" ]; then
+			    echo "Card requested \"$status\" - bailing out"
+			    return 4
+			fi
+			;;
+		esac
+		;;
+            ERROR)
+		if [ "$status" = "pinsent" ]; then
+		    echo "Yay! I might use the wrong pincode - please fix before SIM is locked"
+		else
+		    echo "Card did not accept \"AT+CPIN?\" command - bailing out"
+		fi
+		return 1
+		;;
+            *)
+	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+
+wwan_enable_gps () {
+    [ -n "$WWAN_GPSTTY" ] || return 3
+    echo -e "AT*E2GPSCTL=1,3,1\r" >$MGMT
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+            OK)
+		echo "Enabling GPS output on /dev/$WWAN_GPSTTY"
+		echo -e "AT*E2GPSNPD\r" >/dev/$WWAN_GPSTTY
+		 /lib/udev/gpsd.hotplug add /dev/$WWAN_GPSTTY
+		#gpsd /dev/$WWAN_GPSTTY
+		return 0
+		;;
+	    \+PACSP0)
+		# probably means that our first attempt to connect was too early - retry
+		echo -e "AT*E2GPSCTL=1,3,1\r" >$MGMT
+		err_is_fatal=1  # flag next error as fatal
+		;;
+            ERROR)
+	        if [ -n "$err_is_fatal" ]; then
+		    return 1
+		fi
+		;;
+            *)
+   	        # silently ignore echoed command etc
+		;;
+	esac
+	
+    done <$MGMT
+    return 2 # timeout
+}
+
+# Better just check whether we're already connected before continuing
+wwan_connected () {
+    echo -e "AT*ENAP?\r" >$MGMT
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+	    \*ENAP:*)
+		ENAP=${x#\*ENAP: }
+		;;
+            OK)
+		if [ "$ENAP" = "1" ]; then
+		    return 0
+		else
+		    return 1
+		fi
+		;;
+            ERROR)
+	        # this is expected at this point if the radio is powered down
+                # => ignore silently
+		return 1 # not connected
+		;;
+            *)
+   	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+# wwan_configure_account() will try to make smart account choices:
+#  if APN is unset, then it will choose the first available account
+#  or create a new with APN="" if no accounts were defined
+#  if APN is set to something, then it will try to locate an
+#  existing account with the same APN, or create a new account in
+#  an empty slot
+
+
+wwan_configure_account () {
+## FIXME:  Support choosing specific account numbers
+## FIXME:  Support multiple accounts for the same APN
+## FIXME:  Take into account that we might have holes
+##           in the account numbering
+
+    ## use interface specific APN if specified
+    WWAN_APN=${IF_WWAN_APN:-$WWAN_APN}
+
+    HIGHEST_NUM=0
+    echo -e "AT+CGDCONT?\r" >$MGMT
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+	    
+            +CGDCONT:*)
+		oldifs=$IFS
+		IFS=","
+		tmp=(${x#+CGDCONT: })
+		IFS=$oldifs
+		if [ -z "$ACCOUNT_NUM" -a "\"$WWAN_APN\"" = "${tmp[2]}" ]; then
+		    # found a matching account => use it
+		    ACCOUNT_NUM=${tmp[0]}
+		fi
+		# keep track of accounts in use
+		HIGHEST_NUM=${tmp[0]}
+		;;
+            OK)
+		if [ -z "$ACCOUNT_NUM" ]; then
+		    # create a new one
+		    ACCOUNT_NUM=$((HIGHEST_NUM+1))
+		    echo "Creating new account number $ACCOUNT_NUM for \"$WWAN_APN\""
+		    echo -e "AT+CGDCONT=$ACCOUNT_NUM,\"IP\",\"$WWAN_APN\"\r" >$MGMT
+		else
+		    return 0
+		fi
+		;;
+            ERROR)
+		echo "Failed to create an account"
+		return 1
+		;;
+            *)
+	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+
+wwan_power_radio_on () {
+#  4) power on radio: 
+#    AT+CFUN=1
+
+
+##FIXME: The mode testing below should ensure that the radio is in the
+##user selected mode
+
+    # poll once in case the card was powered on
+    # turn on power status reporting, making further polls unecessary
+    # also turning on network reg status
+    echo -e "AT+CFUN?;*E2CFUN=1;+CGREG=2\r" >$MGMT
+
+    # be careful not to send new commands before getting the OK from the last one...
+    nextcmd=""
+
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+	    \*E2CFUN:*)   # "*E2CFUN: 1,4,0" means power status = 4 
+		oldifs=$IFS
+		IFS=","
+		tmp=(${x#\*E2CFUN: })
+		IFS=$oldifs
+		case "${tmp[1]}" in
+		    "1") 
+			echo "Powered on (auto mode)"
+			# dont. wait until registered
+			# return 0
+			;;
+		    "4")
+			echo "Radio is off"
+			;;
+		    "5")
+			echo "Powered on (GSM only mode)"
+			# dont. wait until registered
+			# return 0
+			;;
+		    "6")
+			echo "Powered on (UTRAN only mode)"
+			# dont. wait until registered
+			# return 0
+			;;
+		    *)
+			echo "Unknown status report: \"$x\""
+			;;
+		esac
+		;;
+
+	    ## NOTE: The format of the unsolicited and solicited command differ
+	    ## solicited:
+	    ## AT+CGREG?
+	    ## +CGREG: 2,1,"4EE9","00C9A2D6",2
+	    ## OK
+	    ##
+	    ## unsolicited:
+
+	    ## +CGREG: 0
+	    ## +CGREG: 0
+	    ## +CGREG: 4
+	    ## *E2CFUN: 1,6,0
+	    ## +CGREG: 4
+	    ## +CGREG: 1,"4EE9","00C9A2D6",2
+
+            +CGREG:*)
+		oldifs=$IFS
+		IFS=","
+		tmp=(${x#+CGREG: })
+		IFS=$oldifs
+
+		# look at the second value if we got a 5 element result
+		if [ ${#tmp[@]} -ge 5 ]; then
+		    stat=${tmp[1]}
+		else
+		    stat=${tmp[0]}
+		fi
+
+		case "$stat" in
+		    "0")
+			# we get these while waiting, so maybe just silently ignore?
+			echo "Not registered"
+		     ;;
+		    "1")
+			##FIXME:  Look at CI to guess GSM (<=FFFF) or UTRAN (>FFFF)
+			echo "Registered to home network"
+			return 0
+			;;
+		    "2")
+			echo "Searching for network..."
+			;;
+		    "3")
+			echo "Network regstration denied - contact operator"
+			;;
+		    "4")
+			## FIXME: Documented as Unknown, but obviously has some meaning
+			echo "Registering..."
+			;;
+		    "5")
+			##FIXME: Report which network/operator using AT+COPS?
+			if [ "$WWAN_ROAMING_OK" = "1" ]; then
+			    echo "Roaming.  Be aware that this can be expensive"
+			    return 0
+			else
+			    echo "Roaming.  Denied by policy.  Please see documentation"
+			    return 3
+			fi
+			;;
+		    *) 
+			echo "A rather unexpected +CGREG status code: ${tmp[0]}"
+			return 3
+		esac
+		;;
+            +CFUN:*)
+		CFUN=${x#+CFUN: }
+		case "$CFUN" in
+		    "1"|"5"|"6") 
+			nextcmd="AT+CGREG?"
+			echo "Already on"
+			##FIXME: verify network registration
+			;;
+		    "4")
+			nextcmd="AT+CFUN=$WWAN_MODE"
+			echo "Powering on radio"
+			;;
+		    *)
+			echo "Unknown radio status: \"$x\""
+			ret=3
+			;;
+		esac
+		;;
+            OK)
+		if [ -n "$nextcmd" ]; then
+		    echo -e "$nextcmd\r" >$MGMT
+		    nextcmd=""
+		fi
+		# note: we don't return here, as the success will be flagged by a +CGREG: 1,... line
+		;;
+            ERROR)
+		echo "Failed to power on radio"
+		return 1
+		;;
+            *)
+	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+
+
+wwan_connect () {
+
+## Well, it may fail else too.  We'd better be prepared, and should probably add
+## better error reporting
+
+##FIXME: Had an incident where the card had to be reset before I got this working
+##   again.  AT*ENAP=1,x just gave ERROR although AT*ENAP=? succeeded
+
+
+    # Note:  we may have to flush a few +CGREG: 1 lines first
+    local TMOUT=1
+    while read x; do
+	case "$x" in
+	    *)
+		;;
+	esac
+    done <$MGMT
+
+    # this needs higher timeout values....
+    local TMOUT=30
+
+    echo -e "AT*E2NAP=1;+CMEE=2\r" >$MGMT
+
+    nextcmd="AT*ENAP=1,$ACCOUNT_NUM"
+
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+	    \*E2NAP:*)
+		case "${x#\*E2NAP: }" in
+		    0)
+			##FIXME:  This must be handled. It *does* happen
+			echo "Not connected. Retrying..."
+			sleep 2  # better make it wait a bit
+			echo -e "AT*ENAP=1,$ACCOUNT_NUM\r" >$MGMT
+			;;
+		    1) 
+			echo "Connected"
+			return 0
+			;;
+		    2)
+			echo "Connection in progress..."
+			;;
+		    *)
+			echo "Unknown status: \"$x\""
+			;;
+		esac
+		;;
+	    \*ENAP:*)
+		;;
+	    OK|\+PACSP0)
+		# +PACSP0 probably means that our first attempt to connect was too early - retry
+		if [ -n "$nextcmd" ]; then
+		    echo -e "$nextcmd\r" >$MGMT
+		    nextcmd=""
+		    err_is_fatal=1  # flag next error as fatal
+		fi
+		;;
+	    ERROR|\+CME\ ERROR:*)
+	        if [ -n "$err_is_fatal" ]; then
+		    return 1
+		fi
+		;;
+            *)
+	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+
+
+
+wwan_disconnect () {
+## FIXME:  Should we power down radio here?  What if someone else is using
+## the GPS or one of the ACM tty's (e.g. a SMS service daemon)?
+## How do we know?
+##
+## Let's make it a configuration issue while we're thinkin
+
+    # Note:  we may have to flush a bit here
+    local TMOUT=1
+    while read x; do
+	case "$x" in
+	    *)
+		;;
+	esac
+    done <$MGMT
+
+    # the disconnect often takes some time
+    local TMOUT=30
+    if ! wwan_connected; then
+	if [ "$WWAN_POWEROFF" == "1" ]; then
+	    echo "Powering down radio"
+	    echo -e "AT+CFUN=4;*E2CFUN=1\r" >$MGMT
+	else
+	    return 0
+	fi
+    else
+        # go ahead disconnect
+	echo -e "AT*ENAP=0;*E2NAP=1;*E2CFUN=1\r" >$MGMT
+    fi
+
+
+    while read x; do
+        # strip \r's so we can use this for output
+        # are there better ways to do multiline stripping? longest match doesn't
+        # seem to catch on the \r's
+	until [ "$x" = "$y" ]; do y=$x; x=${y%$'\r'}; done
+	[ -n "$WWAN_DEBUG" ] && echo $x
+
+	case "$x" in
+	    \*E2NAP:*)
+		E2NAP=${x#\*E2NAP: }
+		case "$E2NAP" in
+		    0)
+			echo "Disconnected"
+			if [ "$WWAN_POWEROFF" == "1" ]; then
+			    echo "Powering down radio"
+			    echo -e "AT+CFUN=4\r" >$MGMT
+			else
+			    return 0
+			fi
+			;;
+		esac
+		;;
+	    \*E2CFUN:*)   # "*E2CFUN: 1,4,0" means power status = 4 
+		oldifs=$IFS
+		IFS=","
+		tmp=(${x#\*E2CFUN: })
+		IFS=$oldifs
+		case "${tmp[1]}" in
+		    "4")
+			echo "Radio is off"
+			return 0
+			;;
+		esac
+		;;
+	    OK)
+		;;
+            ERROR)
+		return 1
+		;;
+            *)
+	        # silently ignore echoed command etc
+		;;
+	esac
+    done <$MGMT
+    return 2 # timeout
+}
+
+
+do_start () {
+     wwan_verify_pin || exit 1
+     wwan_connected && exit 0
+     wwan_configure_account || exit 1
+     wwan_power_radio_on || exit 1
+     wwan_connect || exit 1
+}
+
+do_stop () {
+    wwan_verify_pin || exit 1
+    wwan_disconnect || exit 1
+    # wait to ensure status message resception before interface goes down
+    sleep 2
+}
+
+do_gps () {
+     wwan_verify_pin || exit 1
+     wwan_connected
+     wwan_power_radio_on || exit 1
+     wwan_enable_gps || exit 1
+}
+    
+wwan_getgpsport
+wwan_checkdevice || exit 0
+wwan_getmgmt || exit 0
+
+case "$1" in
+    gps)
+	do_gps
+	;;
+    stop)
+	do_stop
+	;;
+esac
+	
+
+case "$PHASE" in
+    pre-up)
+	do_start
+        ;;
+    post-down)
+	do_stop
+        ;;
+esac
+
+exit 0
