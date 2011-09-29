@@ -12,19 +12,26 @@ License: GPLv2
 #include <errno.h>
 #include <termios.h>
 
-/* default values for options */
-static char *supported[] = { "0bdb:1900", NULL };
+/* list of supported USB devices (pid:vid) */
+static char *supported[] = {
+	"0bdb:1900",		/* Ericsson Business Mobile Networks BV F3507g Mobile Broadband Module */
+	NULL			/* list terminator */
+};
+
+
 static int timeout = 10;	/* read timeout */
-static char wwan_apn[] = "";
+
+/* default values for options */
+static char wwan_apn[] = "";	/* null APN may often Just Work(tm) */
 static int wwan_poweroff = 1;	/* power off radio when interface goes down? */
 static char wwan_gpstty[] = "";
 static int wwan_mode = 1;	/* Radio mode 1=auto, 5=GSM, 6=UTRAN */
 static int wwan_roaming_ok = 0;	/* Disallow roaming by default */
 static int wwan_debug = 0;
 static char wwan_cfg_file[] = "/etc/default/wwan_ctl";
-static int wwan_simpin = 0;
+static int wwan_simpin = -1;    /* a 4 digit decimal number between 0000 and 9999 */
 
-/* saved values */
+/* global variables */
 static struct termios restore_tios;
 
 void dbg(const char *str, ...)
@@ -163,6 +170,23 @@ int cmd(int fd, const char *cmd, char *buf, ssize_t bufsize)
 	return n;
 }
 
+int do_up(void)
+{
+	
+	return -1;
+}
+
+int do_down(void)
+{
+	return -1;
+}
+
+int do_gps(void)
+{
+	return -1;
+}
+
+
 int main(int argc, char **argv)
 {
 	int mgmt_fd;
@@ -186,7 +210,7 @@ int main(int argc, char **argv)
 	fprintf(stderr, "%s", buf);
 
 	if (strstr(buf, "+CPIN: SIM PIN")) {
-		if (!wwan_simpin)
+		if ((wwan_simpin < 0) || (wwan_simpin > 9999)) /* sane? */
 			fatal("SIM PIN required");
 		sprintf(buf, "AT+CPIN=\"%04d\"", wwan_simpin);
 		c = cmd(mgmt_fd, buf, buf, sizeof(buf));
