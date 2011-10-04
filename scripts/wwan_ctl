@@ -197,7 +197,7 @@ wwan_verify_pin () {
     while read x; do
 	case "$x" in
 	    \*EMRDY:*)
-		if [ ${x#\*EMRDY: } -ne 1 ]; then
+		if [ "${x#\*EMRDY: }" != "1" ]; then
 		    echo "Unknown state: $x"
 		else
 		    echo "Card is ready for commands"
