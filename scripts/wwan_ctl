@@ -599,9 +599,11 @@ wwan_connect () {
     # this needs higher timeout values....
     local TMOUT=30
 
+    # turn on status reporting
     echo -e "AT*E2NAP=1;+CMEE=2\r" >$MGMT
 
-    nextcmd="AT*ENAP=1,$ACCOUNT_NUM"
+    # repeat turning on status reporting as well, as that will fail too if not fully powered up
+    nextcmd="AT*E2NAP=1;+CMEE=2;*ENAP=1,$ACCOUNT_NUM"
 
     while read x; do
         # strip \r's so we can use this for output
