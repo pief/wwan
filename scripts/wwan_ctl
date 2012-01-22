@@ -151,12 +151,14 @@ wwan_getmgmt () {
     ver=`uname -r`
     if [ ${ver%%-*} \> "2.6.32" ]; then
 	echo "Enabling workaround for cdc-wdm problems in Linux $ver"
-	ttys=tty
+        devs="$USBDEV/*/tty/*" 
     else
-	ttys="{usb,tty}"
+        devs="$USBDEV/*/usb/* $USBDEV/*/usb:* $USBDEV/*/tty/* $USBDEV/*/tty:*" 
     fi
 
-    for d in $USBDEV/*/$ttys/* $USBDEV/*/$ttys:*; do if [ -e $d ]; then 
+echo DEBUG: devs=\"$devs\"
+
+    for d in $devs; do if [ -e $d ]; then 
 	dev=`basename $d | sed -e 's/.*://'`
 	echo "trying $dev"
 	LOCK="/var/lock/LCK..$dev"
