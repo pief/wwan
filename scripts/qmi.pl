@@ -10,19 +10,31 @@ use constant {
     QMI_DMS => 2,
 };
 
-# global variables
+### global variables ###
 
-my $dev;		# management device
-my @cid;		# array of allocated CIDs
-my $netdev = "wwan1";	# netdevice - FIXME: get this from environement
-my $tid = 1;		# transaction id
+# interface
+my $netdev = $ENV{'IFACE'};		# netdevice
+$netdev = $ARGV[1] if ($ARGV[1]);	# let command line override interface (e.g for status command)
+die "Unable to continue with no interface name\n" unless $netdev;
 my $state = "/etc/network/run/qmistate.$netdev"; # state keeping file
 
+# per interface config
+my %pin; $pin{1} = $ENV{'WWAN_PIN'} if $ENV{'WWAN_PIN'};
+my $apn = $ENV{'WWAN_APN'};
+my $user = $ENV{'WWAN_USER'};
+my $pw = $ENV{'WWAN_PW'};
+
+# output levels
+my $verbose = 0;
 my $debug = 0;
 
+# internal state
+my $dev;		# management device
+my @cid;		# array of allocated CIDs
+my $tid = 1;		# transaction id
+my $wds_handle;		# connection handle
 
 # translation tables
-
 my %err = (
     0x0000 => "QMI_ERR_NONE",
     0x0001 => "QMI_ERR_MALFORMED_MSG",
@@ -126,8 +138,13 @@ my %err = (
     0x0070 => "QMI_ERR_PB_HIDDEN_KEY_RESTRICTION",
     );
 
+my %sysname = (
+    0 => "QMI_CTL",
+    1 => "QMI_WDS",
+    2 => "QMI_DMS",
+    );
 
-# 1. find the associated QMI interface
+### 1. find the associated QMI interface  ###
 #
 #  bjorn@nemi:~$ ls -l /sys/class/net/wwan1/device
 #  lrwxrwxrwx 1 root root 0 Jan 20 04:43 /sys/class/net/wwan1/device -> ../../../2-1:1.4
@@ -137,23 +154,31 @@ my %err = (
 
 
 sub get_mgmt_dev {
-    my $net = shift;
     my $ret = '';
 
-    my $usbif = readlink("/sys/class/net/$net/device"); # ../../../2-1:1.4
+    # no IFACE environment variable?
+    return $ret if (!$netdev);
+
+    my $usbif = readlink("/sys/class/net/$netdev/device"); # ../../../2-1:1.4
+    return $ret if (!$usbif);
     $usbif =~ s!.*/!!;                                  # 2-1:1.4
     my ($usbdev) = split(/:/, $usbif, 2);               # 2-1
-    opendir(D, "/sys/class/usb");
+    return $ret if (!$usbdev);
+
+    opendir(D, "/sys/class/usb") || return $ret;
     while (my $f = readdir(D)) { # cdc-wdm0 -> ../../devices/pci0000:00/0000:00:1d.7/usb2/2-1/2-1:1.3/usb/cdc-wdm0
 	next unless ($f =~ /^cdc-wdm/);
-	if (readlink("/sys/class/usb/$f") =~ m!/$usbdev/$usbdev:.*/usb/cdc-wdm!) {
+	if (readlink("/sys/class/usb/$f") =~ m!/$usbdev/$usbdev:.*/usb/cdc-wdm!) { # found it!
 	    $ret = "/dev/$f";
 	    last;
 	}
     }
     closedir(D);
+    warn "Will use $ret for management of $netdev\n" if ($ret && $verbose);
     return $ret;
 }
+
+### QMI helpers ###
 
 # $tlvs = { type1 => packdata, type2 => packdata, .. 
 sub mk_qmi {
@@ -175,12 +200,15 @@ sub mk_qmi {
 sub decode_qmi {
     my $packet = shift;
 
+    return {} unless $packet;
+
     printf "%02x " x length($packet) . "\n", unpack("C*", $packet) if $debug;
 
-
     my ($tf, $len, $ctrl, $sys, $cid) = unpack("CvCCC", $packet);
+    return {} unless ($tf == 1);
+
     my ($flags, $tid, $msgid, $tlvlen, $tlvs);
-    if ($cid != 0) {
+    if ($sys != 0) {
 	($flags, $tid, $msgid, $tlvlen) = unpack("Cvvv", substr($packet, 6));
 	$tlvs = substr($packet, 13);
     } else {
@@ -216,16 +244,25 @@ sub mk_ascii {
 sub pretty_print_qmi {
     my $qmi = shift;
 
-    print "QMUX Header:\n";
-    printf "  len:    0x%04x\n", $qmi->{len};
-    printf "  sender: 0x%02x\n", $qmi->{ctrl}; # (service)
-    printf "  svc:    0x%02x\n", $qmi->{sys}; # (wds)
-    printf "  cid:    0x%02x\n", $qmi->{cid}; 
-    print "\nQMI Header:\n";
-    printf "  Flags:  0x%02x\n", $qmi->{flags}; # (response)
-    printf "  TXN:    ". ($qmi->{sys} != QMI_CTL ? "0x%04x\n" : "0x%02x\n"), $qmi->{tid};
-    printf "  Cmd:    0x%04x\n", $qmi->{msgid}; # (GET_PKT_STATUS)
-    printf "  Size:   0x%04x\n", $qmi->{tlvlen};
+    return unless exists($qmi->{tf});
+
+    my $pfx = '';
+    if ($qmi->{ctrl}) {
+	$pfx = "<= ";
+    } else {
+	$pfx = "=> ";
+    }	
+
+    print "${pfx}QMUX Header:\n";
+    printf "$pfx  len:    0x%04x\n", $qmi->{len};
+    printf "$pfx  sender: 0x%02x\n", $qmi->{ctrl}; # (service)
+    printf "$pfx  svc:    0x%02x\n", $qmi->{sys}; # (wds)
+    printf "$pfx  cid:    0x%02x\n", $qmi->{cid}; 
+    print "\n${pfx}QMI Header:\n";
+    printf "$pfx  Flags:  0x%02x\n", $qmi->{flags}; # (response)
+    printf "$pfx  TXN:    ". ($qmi->{sys} != QMI_CTL ? "0x%04x\n" : "0x%02x\n"), $qmi->{tid};
+    printf "$pfx  Cmd:    0x%04x\n", $qmi->{msgid}; # (GET_PKT_STATUS)
+    printf "$pfx  Size:   0x%04x\n", $qmi->{tlvlen};
 
     foreach my $k (sort { $a <=> $b } keys %{$qmi->{tlvs}}) {
 	my $v = $qmi->{tlvs}{$k};
@@ -239,16 +276,28 @@ sub pretty_print_qmi {
 	    $txt = mk_ascii($v);
 	}
 
-	printf "[0x%02x] (%2d) " . "%02x " x $tlvlen . "\t$txt\n", $k, $tlvlen, @$v;
+	printf "${pfx}[0x%02x] (%2d) " . "%02x " x $tlvlen . "\t$txt\n", $k, $tlvlen, @$v;
 #	printf "\n  TLV:    0x%02x\n", $k; # (WDS/Get Packet Service Status Response/Result Code)
 #	printf "  Size:   0x%04x\n", $tlvlen;
 #	printf "  Data:   ". "%02x " x $tlvlen . "\n", @$v;
     }
 }
 
+# check if two messages are part of the same transaction
+sub qmi_match {
+    my ($q1, $q2) = @_;
 
+    for my $f (qw(tf sys cid msgid)) {
+	return undef unless (exists($q1->{$f}) && exists($q2->{$f}) && $q1->{$f} == $q2->{$f});
+    }
+    return 1;
+}
+
+# FIXME: needs to verify that the received packet is the answer
+# FIXME: needs timeout
 sub send_and_recv {
     my $cmd = shift;
+    my $timeout = shift || 5;
 
     return {} if (!$cmd);
 
@@ -257,26 +306,62 @@ sub send_and_recv {
     return {} unless $dev;
 
     warn("sending to $dev:\n") if $debug;
-    pretty_print_qmi(decode_qmi($cmd)) if $debug;
 
-    my $raw;
+    my $qmi_out = decode_qmi($cmd);
+    pretty_print_qmi($qmi_out) if $debug;
+
+    my $qmi_in = {};
     open(F, "+<", $dev) || die "open $dev: $!\n";
     autoflush F 1;
     print F $cmd;
     warn("reading from $dev\n") if $debug;
-    my $len = sysread(F, $raw, 256);
+
+    eval {
+	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
+	my $raw;
+	my $found;
+	alarm $timeout;
+	do {
+	    if (!$raw) {
+		my $len = sysread(F, $raw, 256);
+		warn("read $len bytes from $dev\n") if $debug;
+	    } else {
+		warn "$netdev: last read return multiple packets\n" if $verbose;
+	    }
+
+	    $qmi_in = decode_qmi($raw);
+
+	    # a single read may return more than one packet!
+	    if ($qmi_in->{tf}) {
+		$raw = substr($raw, $qmi_in->{len} + 1);
+	    } else {
+		$raw = '';
+	    }
+
+	    # matching reply?
+	    $found = &qmi_match($qmi_out, $qmi_in);
+	    if (!$found && $debug) {
+		warn "skipping unrelated message\n";
+		pretty_print_qmi($qmi_in) if $debug;
+ 	    }
+
+	} while (!$found);
+	alarm 0;
+    };
+    if ($@) {
+	die unless $@ eq "alarm\n";   # propagate unexpected errors
+    }
     close(F);
 
-    warn("read $len bytes from $dev\n") if $debug;
-    my $qmi = decode_qmi($raw);
-    pretty_print($qmi) if $debug;
-    return $qmi;
+    pretty_print_qmi($qmi_in) if $debug;
+    return $qmi_in;
 }
+
 
 sub verify_status {
     my $qmi = shift;
-
-    return 0 if (ref($qmi) ne "HASH" || !exists($qmi->{tlvs}) || !exists($qmi->{tlvs}{0x02}));
+    return 1 if ((ref($qmi) ne "HASH") || !exists($qmi->{tf}));
+    return 0 if (!exists($qmi->{tlvs}) || !exists($qmi->{tlvs}{0x02}));
     return unpack("v", pack("C*", @{$qmi->{tlvs}{0x02}}[2..3]));
 }
 
@@ -287,22 +372,28 @@ sub get_cid {
 
     my $req = mk_qmi(0, 0, 0x0022, {0x01 => pack("C*", $sys)});
     my $ret = send_and_recv($req);
-    
-    if (!verify_status($ret) && $ret->{tlvs}{0x01}[0] == $sys) {
+
+    my $status = verify_status($ret);
+    if (!$status && $ret->{tlvs}{0x01}[0] == $sys) {
 	$cid[$sys] = $ret->{tlvs}{0x01}[1];
     } else {
-	warn "status not OK: " . Dumper($ret);
+	warn "CID request for $sysname{$sys} failed: $err{$status}\n";
     }
     
     return $cid[$sys];
 }
 
+# release all CIDs with the possible exception of QMI_WDS if we started a connection
 sub release_cids {
     for (my $sys = 0; $sys < scalar @cid; $sys++) {
 	if ($cid[$sys]) {
+	    if ($wds_handle && $sys == QMI_WDS) {
+		warn "not releasing QMI_WDS cid=$cid[$sys] while connected\n" if $verbose;
+		next;
+	    }
 	    my $req = mk_qmi(0, 0, 0x0023, {0x01 => pack("C*", $sys, $cid[$sys])});
  	    my $ret = send_and_recv($req);
-	    warn "released cid=$cid[$sys] for sys=$sys with status=" . verify_status($ret) . "\n";
+	    warn "released cid=$cid[$sys] for sys=$sys with status=" . verify_status($ret) . "\n" if $verbose;
 	    $cid[$sys] = 0;
 	}
     }
@@ -320,12 +411,10 @@ sub mk_dms {
     return mk_qmi(QMI_DMS, $cid, @_);
 }
 
-sub wds_print_settings {
-    my $req = mk_wds(0x002d);
-    if ($req) {
-	my $ret = send_and_recv($req);
-	pretty_print_qmi($ret);
-    }
+sub wds_get_runtime_settings {
+    my $req = mk_wds(0x002d); # QMI_WDS_GET_RUNTIME_SETTINGS
+    my $ret = send_and_recv($req);
+    pretty_print_qmi($ret);
 }
 
 my %srvc_status = (
@@ -336,20 +425,28 @@ my %srvc_status = (
 );
 sub wds_get_pkt_srvc_status {
     my $req = mk_wds(0x0022); # QMI_WDS_GET_PKT_SRVC_STATUS
-    my $ret = send_and_recv($req);
+    my $ret = send_and_recv($req, 2); # short timeout
     my $status = verify_status($ret);
     if ($status) {
 	warn "wds_get_pkt_srvc_status: $err{$status}\n";
-	return "unknown";
+	return undef;
     }
     my $v = $ret->{tlvs}{0x01};
     return $srvc_status{$v->[0]};
 }
 
+sub wds_stop_network_interface {
+    if (!$wds_handle) {
+	warn "$netdev: unable to disconnect without a valid handle\n";
+	return 'FAILED';
+    }
+    my $req = mk_wds(0x0021, { 0x01 => pack("V", $wds_handle) } ); # QMI_WDS_STOP_NETWORK_INTERFACE
+    my $ret = send_and_recv($req);
+    $wds_handle = 0; # reset handle to allow releasing the CID
+    return $err{&verify_status($ret)};
+}
+
 sub wds_start_network_interface {
-    my $apn = "pilot.telenor"; # FIXME!
-    my $user = "";
-    my $pw = "";
     my %tlv;
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
@@ -357,31 +454,44 @@ sub wds_start_network_interface {
 
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
-    pretty_print_qmi(decode_qmi($req));
-
     # need to save handle (and WMS CID!!!) for disconnect
-    my $ret = send_and_recv($req);
-    pretty_print_qmi($ret);
-
+    my $ret = send_and_recv($req, 60);
     my $status = verify_status($ret);
     if ($status) {
 	warn "Connection failed: $err{$status}\n";
-	return undef;
+	pretty_print_qmi($ret);
+	return $status;
     }
 
     my $v = $ret->{tlvs}{0x01};
-    if (open(X, ">$state")) {
-	printf X "%u %u\n", $cid[QMI_WDS], unpack("V*", pack("C*", @$v));
-	close X;
-    } else {
-	warn "cannot open \"$state\": $!\n";
-    }
+    $wds_handle = unpack("V*", pack("C*", @$v)); # save as a 32bit integer
+    printf STDERR "$netdev: got QMI_WDS handle 0x%08x\n", $wds_handle;
 
-#[0x02] ( 4) 01 00 4f 00         FAILURE - QMI_ERR_POLICY_MISMATCH
-
+    return $status;
 }
 
 
+### 2. verify and optionally enter PIN code ###
+
+sub dms_enter_pin {
+    my $pinnumber = shift;
+
+    unless ($pin{$pinnumber}) {
+	warn "No PIN$pinnumber configured\n" if $verbose;
+	return undef;
+    }
+    my $pin = $pin{$pinnumber};
+    my $req = &mk_dms(0x0028,  # QMI_DMS_UIM_VERIFY_PIN
+		      { 0x01 => pack("C*", $pinnumber, length($pin)) . $pin});
+    
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if ($status) {
+	warn "PIN$pinnumber verification failed: $err{$status}\n";
+	return undef;
+    }
+    return 1;
+}
 
 my %pinstatus = (
     0 => "not initialized",
@@ -393,10 +503,10 @@ my %pinstatus = (
     6 => "unblocked",
     7 => "changed",
     );
-
-# 2. verify and optionally enter PIN code
 sub dms_verify_pin {
     my $req = mk_dms(0x002b); # QMI_DMS_UIM_GET_PIN_STATUS
+    my %pinok;
+
     if ($req) {
 	my $ret = send_and_recv($req);
 	return undef if (verify_status($ret));
@@ -404,26 +514,18 @@ sub dms_verify_pin {
 	for (my $pin = 1; $pin <=2; $pin++) {
 	    my $tlv = $ret->{tlvs}{0x10 + $pin};
 	    next unless $tlv;
-	    print "PIN$pin status: $pinstatus{$tlv->[0]}, verify_left: $tlv->[1], unblock_left: $tlv->[2]\n";
+	    warn "PIN$pin status: $pinstatus{$tlv->[0]}, verify_left: $tlv->[1], unblock_left: $tlv->[2]\n" if $verbose;
+	    $pinok{$pin} = 1 if ($tlv->[0] == 2 || $tlv->[0] == 3);
+	    if ($tlv->[0] == 1) { # enabled, not veriﬁed
+		if ($tlv->[1] >= 3) {
+		     $pinok{$pin} = &dms_enter_pin($pin);
+		} else {
+		    warn "less than 3 verification attempts left for PIN$pin - must be entered manually!\n" if ($pin == 1 || $verbose);
+		}
+	    }
 	}
     }
-}
-
-sub dms_enter_pin1 {
-    my $pin = "1525"; # FIXME!
-    my $req = mk_dms(0x0028,  # QMI_DMS_UIM_VERIFY_PIN
-		     { 0x01 => pack("C*", 1, length($pin)) . $pin});
-
-    pretty_print_qmi(decode_qmi($req));
-    if ($req) {
-	my $ret = send_and_recv($req);
-	pretty_print_qmi($ret);
-
-
-#[0x02] ( 4) 01 00 0c 00         FAILURE - QMI_ERR_INCORRECT_PIN
-#[0x02] ( 4) 00 00 00 00         SUCCESS - QMI_ERR_NONE
-
-    }
+    return $pinok{1};  # we only really care about PIN1
 }
 
 sub dms_dump_msg {
@@ -437,14 +539,12 @@ sub dms_dump_msg {
 
 sub wds_get_current_channel_rate {
     my $req = mk_wds(0x0023); # QMI_WDS_GET_CURRENT_CHANNEL_RATE
-    if ($req) {
-	my $ret = send_and_recv($req);
+    my $ret = send_and_recv($req);
 
-	return [ 'unknown' x 4 ] if (verify_status($ret));
+    return [ ('unknown') x 4 ] if (verify_status($ret));
 
-	my $v = $ret->{tlvs}{0x01};
-	return [ map { $_ == 0xffffffff ? 'unknown' : $_ } unpack("V*", pack("C*", @$v)) ];
-    }
+    my $v = $ret->{tlvs}{0x01};
+    return [ map { $_ == 0xffffffff ? 'unknown' : $_ } unpack("V*", pack("C*", @$v)) ];
 }
 
 sub format_ms {
@@ -503,15 +603,13 @@ my %data_bearer = (
 
 sub wds_get_data_bearer_technology {
     my $req = mk_wds(0x0037); # QMI_WDS_GET_DATA_BEARER_TECHNOLOGY
-    if ($req) {
-	my $ret = send_and_recv($req);
-#	pretty_print_qmi($ret);
-	return $data_bearer{0xff} if (verify_status($ret));
+    my $ret = send_and_recv($req);
+	
+    return $data_bearer{0xff} if (verify_status($ret));
 
-	my $v = $ret->{tlvs}{0x01} if exists($ret->{tlvs}{0x01}); # Data Bearer Technology
-	$v = $ret->{tlvs}{0x10} if exists($ret->{tlvs}{0x10}); # Last Call Data Bearer Technology
-	return $data_bearer{$v->[0]};
-    }
+    my $v = $ret->{tlvs}{0x01} if exists($ret->{tlvs}{0x01}); # Data Bearer Technology
+    $v = $ret->{tlvs}{0x10} if exists($ret->{tlvs}{0x10}); # Last Call Data Bearer Technology
+    return $data_bearer{$v->[0]};
 }
 
 sub tlv01_ascii {
@@ -522,35 +620,192 @@ sub tlv01_ascii {
     return pack("C*", @$v);
 }
 
-#&wds_print_settings;
+sub wds_reset {
+    my $ret = send_and_recv(mk_wds(0x0000));
+    pretty_print_qmi($ret);
+}
 
-&dms_enter_pin1;
-&dms_verify_pin;
+sub save_wds_state {
+    if (open(X, ">$state")) {
+	if ($wds_handle) {
+	    printf X "%u %u\n", $cid[QMI_WDS], $wds_handle;
+	}
+	close X;
+    } else {
+	warn "$netdev: FATAL: cannot open \"$state\": $!\n";
+	$wds_handle = 0; # will cause disconnect when CID is released
+    }
+}
 
-&wds_start_network_interface;
+sub get_wds_state {
+    if ($cid[QMI_WDS]) {
+	warn "cannot update state after QMI_WDS commands\n";
+	return;
+    }
+    if (!open(X, $state)) {
+	warn "unable to open $state: $!\n" if $debug;
+	return;
+    }
+    my $x = <X>;
+    close X;
+    ($cid[QMI_WDS], $wds_handle) = split(/ /, $x) if $x;
 
-my $rate = &wds_get_current_channel_rate;
-print "current tx/rx = $rate->[0]/$rate->[1], max tx/rx = $rate->[2]/$rate->[3]\n";
+    # verify that the state is valid
+    my $conn = &wds_get_pkt_srvc_status;
+    if (!$conn || $conn ne 'CONNECTED') { # handle is invalid
+	$wds_handle = 0;
+    }
+    if (!$conn) { # CID is invalid
+	$cid[QMI_WDS] = 0;
+    }
+    $tid ||= 1;
+    printf STDERR "$netdev: QMI_WDS cid=%u, wds_handle=0x%08x\n", $cid[QMI_WDS], $wds_handle if $verbose;
+}
 
-my $call = &wds_get_call_duration;
-map { print "$_: $call->{$_}\n" } keys %$call;
+sub device_info {
+    warn "$netdev: Manufacturer: ", &tlv01_ascii(&send_and_recv(&mk_dms(0x0021))), "\n"; # QMI_DMS_GET_DEVICE_MFR
+    warn "$netdev: Revision: ",  &tlv01_ascii(&send_and_recv(&mk_dms(0x0023))), "\n"; # QMI_DMS_GET_DEVICE_REV_ID
+}
 
-print "Current data bearer: ", &wds_get_data_bearer_technology, "\n";
+# detect whether device management interface talks QMI
+sub is_qmi {
+   my $req = mk_dms(0x0020);	# QMI_DMS_GET_DEVICE_CAP
+   my $ret = send_and_recv($req, 1);	# 1 second timeout
+   return undef if !exists($ret->{tf});
 
-print "Connection status: ", &wds_get_pkt_srvc_status, "\n";
+   # report capabilities
+   my $v = $ret->{tlvs}{0x01};
+   my ($max_tx, $max_rx, $data, $sim, $nradio, @radio) = unpack("VVCCCC*", pack("C*", @$v));
+   my %data_cap_map = ( 
+       0 => 'none',
+       1 => 'CS',
+       2 => 'PS',
+       3 => 'CS & PS',
+       4 => 'CS | PS',
+       );
+   my %radio_cap_map = (
+       1 => "CDMA2000 1X",
+       2 => "CDMA2000 HRPD (1xEV-DO)",
+       4 => "GSM",
+       5 => "UMTS",
+       8 => "LTE",
+       );
 
-# QMI_WDS_GET_CURRENT_CHANNEL_RATE
-#&dms_dump_msg(0x0020); # QMI_DMS_GET_DEVICE_CAP
+   # return capability string
+   return "max tx/rx=$max_tx/$max_rx, service=$data_cap_map{$data}, SIM is " .
+       ($sim ? '' : 'not ') . "supported, radios=" . join(',', map { $radio_cap_map{$_} } @radio);
+
+}
+
+# detect whether device management interface talks AT
+sub is_at {
+    open(F, "+<", $dev) || die "open $dev: $!\n";
+    autoflush F 1;
+    print F "ATI\r\n";
+    warn("reading from $dev\n") if $debug;
+    my $r = '';
+
+    eval {
+	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
+	my $raw;
+	my $found;
+	alarm 1;
+	do {
+	    my $len = sysread(F, $raw, 256);
+	    warn("read $len bytes from $dev\n") if $debug;
+	    $r .= $raw;
+	} while ($raw !~ /OK/);
+	alarm 0;
+    };
+    if ($@) {
+	die unless $@ eq "alarm\n";   # propagate unexpected errors
+    }
+    close(F);
+    return ($r =~ /OK/);
+}
 
 
+sub status {
+    warn "$netdev: capabilities: ", &is_qmi, "\n";
 
-print "Manufacturer: ", &tlv01_ascii(&send_and_recv(&mk_dms(0x0021))), "\n"; # QMI_DMS_GET_DEVICE_MFR
-#&dms_dump_msg(0x0022); # QMI_DMS_GET_DEVICE_MODEL_ID
-print "Revision: ",  &tlv01_ascii(&send_and_recv(&mk_dms(0x0023))), "\n"; # QMI_DMS_GET_DEVICE_REV_ID
-#&dms_dump_msg(0x0025); # QMI_DMS_GET_DEVICE_SERIAL_NUMBERS
-#&dms_dump_msg(0x002c); # QMI_DMS_GET_DEVICE_HARDWARE_REV
+    my $conn = &wds_get_pkt_srvc_status || 'unknown';
+    warn "$netdev: $conn\n";
+    return unless ($conn eq 'CONNECTED');
+
+    warn "$netdev: current data bearer: ", &wds_get_data_bearer_technology, "\n";
+    my $rate = &wds_get_current_channel_rate;
+    warn "$netdev: current tx/rx = $rate->[0]/$rate->[1]\n";
+    warn "$netdev: max tx/rx = $rate->[2]/$rate->[3]\n";
+    
+    my $call = &wds_get_call_duration;
+    map { warn "$netdev: $_: $call->{$_}\n" } keys %$call;
+}
+
+sub usage {
+    warn "Usage: $0 start|stop|status [iface]\n";
+    exit;
+}
+
+
+### main ###
+
+# look up management character device
+$dev = &get_mgmt_dev($netdev);
+if (!$dev) {
+    die "$netdev: Cannot find a QMI management interface!\n";
+}
+
+if (&is_at) {
+    die "$netdev: no support for AT command $dev yet\n";
+}
+
+# sanity
+if (!&is_qmi) {
+    die "$netdev: unable to detect $dev protocol\n";
+}
+
+# get and verify cached data, so we can reuse the QMI_WDS CID at least
+&get_wds_state;
+
+# start interface?
+if ($ARGV[0] eq 'start') {
+    if (&dms_verify_pin) {
+	# FIXME: must wait for network registration before continuing
+	&wds_start_network_interface;
+    } else {
+	warn "$netdev: cannot start with PIN verification\n";
+    }
+
+# stop interface?
+} elsif ($ARGV[0] eq 'stop') {
+    &wds_stop_network_interface;
+
+# or just print status?
+} elsif ($ARGV[0] eq 'status') {
+    &status;
+} else {
+    &usage;
+}
+
+# save state for next run
+&save_wds_state;
+
+# release all releasable CIDs
 &release_cids;
 
+__END__
+
+
+## freeing all possible CIDs
+for (my $i = 2; $i < 50; $i++) {
+    $cid[QMI_WDS] = $i;
+    $cid[QMI_DMS] = $i;
+    &release_cids;
+}
+
+
+## another option:
+## QMI_CTL SYNC (0x0027) seems to clear everything...
 
 
 __END__
@@ -562,3 +817,23 @@ __END__
 # 5. disconnect using saved handle
 
 
+Insufficient resources:
+
+[0x14] (13) 70 69 6c 6f 74 2e 74 65 6c 65 6e 6f 72      pilot.telenor
+QMUX Header:
+  len:    0x001f
+  sender: 0x80
+  svc:    0x01
+  cid:    0x49
+
+QMI Header:
+  Flags:  0x02
+  TXN:    0x0002
+  Cmd:    0x0020
+  Size:   0x0013
+[0x02] ( 4) 01 00 0e 00         FAILURE - QMI_ERR_CALL_FAILED
+[0x10] ( 2) ed 03       ..
+[0x11] ( 4) 06 00 1a 00         ....
+
+
+wds_reset hjelper...
