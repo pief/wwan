@@ -10,9 +10,16 @@ use constant {
     QMI_DMS => 2,
 };
 
+### functions used during enviroment variable parsing ###
 sub usage {
     warn "Usage: $0 start|stop|status [iface]\n";
     exit;
+}
+
+sub strip_quotes {
+    my $x = shift;
+    $x =~ s/"([^"]*)"/$1/ if $x;
+    return $x;
 }
 
 ### global variables ###
@@ -23,11 +30,12 @@ $netdev = $ARGV[1] if ($ARGV[1]);	# let command line override interface (e.g for
 &usage unless $netdev;
 my $state = "/etc/network/run/qmistate.$netdev"; # state keeping file
 
+
 # per interface config
-my %pin; $pin{1} = $ENV{'WWAN_PIN'} if $ENV{'WWAN_PIN'};
-my $apn = $ENV{'WWAN_APN'};
-my $user = $ENV{'WWAN_USER'};
-my $pw = $ENV{'WWAN_PW'};
+my %pin; $pin{1} = &strip_quotes($ENV{'IF_WWAN_PIN'}) if $ENV{'IF_WWAN_PIN'};
+my $apn =  &strip_quotes($ENV{'IF_WWAN_APN'});
+my $user = &strip_quotes($ENV{'IF_WWAN_USER'});
+my $pw = &strip_quotes($ENV{'IF_WWAN_PW'});
 
 # output levels
 my $verbose = 1;
@@ -292,35 +300,19 @@ sub pretty_print_qmi {
 sub qmi_match {
     my ($q1, $q2) = @_;
 
-    for my $f (qw(tf sys cid msgid)) {
+    for my $f (qw(tf ctrl flags sys cid msgid)) {
 	return undef unless (exists($q1->{$f}) && exists($q2->{$f}) && $q1->{$f} == $q2->{$f});
     }
     return 1;
 }
 
-# FIXME: needs to verify that the received packet is the answer
-# FIXME: needs timeout
-sub send_and_recv {
-    my $cmd = shift;
-    my $timeout = shift || 5;
-
-    return {} if (!$cmd);
-
-    # get cached device, or lookup and cache
-    $dev ||= get_mgmt_dev($netdev);
-    return {} unless $dev;
-
-    warn("sending to $dev:\n") if $debug;
-
-    my $qmi_out = decode_qmi($cmd);
-    pretty_print_qmi($qmi_out) if $debug;
+# read from F until match or timeout
+sub read_match {
+    my $match = shift;
+    my $timeout = shift;
 
     my $qmi_in = {};
-    open(F, "+<", $dev) || die "open $dev: $!\n";
-    autoflush F 1;
-    print F $cmd;
     warn("reading from $dev\n") if $debug;
-
     eval {
 	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
 	my $raw;
@@ -344,24 +336,52 @@ sub send_and_recv {
 	    }
 
 	    # matching reply?
-	    $found = &qmi_match($qmi_out, $qmi_in);
+	    $found = &qmi_match($match, $qmi_in);
 	    if (!$found && $debug) {
 		warn "skipping unrelated message\n";
-		pretty_print_qmi($qmi_in) if $debug;
  	    }
-
+	    pretty_print_qmi($qmi_in) if $debug;
 	} while (!$found);
 	alarm 0;
+	warn "got match!\n" if ($found && $debug);
     };
     if ($@) {
 	die unless $@ eq "alarm\n";   # propagate unexpected errors
     }
+    return  $qmi_in;
+}
+
+
+# FIXME: needs to verify that the received packet is the answer
+# FIXME: needs timeout
+sub send_and_recv {
+    my $cmd = shift;
+    my $timeout = shift || 5;
+
+    return {} if (!$cmd);
+
+    # get cached device, or lookup and cache
+    $dev ||= get_mgmt_dev($netdev);
+    return {} unless $dev;
+
+    warn("sending to $dev:\n") if $debug;
+
+    my $qmi_out = decode_qmi($cmd);
+    pretty_print_qmi($qmi_out) if $debug;
+
+    open(F, "+<", $dev) || die "open $dev: $!\n";
+    autoflush F 1;
+    print F $cmd;
+
+    # set up for matching
+    $qmi_out->{flags} = $qmi_out->{sys} ? 0x02 : 0x01; # response
+    $qmi_out->{ctrl} = 0x80;  # service
+    my $qmi_in = read_match($qmi_out, $timeout);
     close(F);
 
     pretty_print_qmi($qmi_in) if $debug;
     return $qmi_in;
 }
-
 
 sub verify_status {
     my $qmi = shift;
@@ -370,21 +390,64 @@ sub verify_status {
     return unpack("v", pack("C*", @{$qmi->{tlvs}{0x02}}[2..3]));
 }
 
+# sending a QMI_CTL SYNC message will release all allocated CIDs and
+# therefore also disconnect device!
+sub ctl_sync {
+    my $req = mk_qmi(0, 0, 0x0027);
+    my $ret = send_and_recv($req);
+    my $status = &verify_status($ret);
+    if (!$status) {
+	# reset all cached state as it is now invalid
+	@cid = ();
+	$wds_handle = 0;
+    }
+    return $status;
+}
+
+# will receive a QMI_CTL sync notification when device is ready after
+# PIN verification
+sub wait_for_sync_ind {
+    my $timeout = shift || 5;
+
+    # read until satisfied
+    open(F, $dev) || die "open $dev: $!\n";
+    autoflush F 1;
+
+    # set up for matching
+    my $match = {
+	tf => 1,
+	sys => 0,
+	cid => 0,
+	flags => 0x02,
+	ctrl => 0x80,
+	msgid => 0x0027,
+    };
+    my $qmi_in = read_match($match, $timeout);
+    close(F);
+
+    return exists($qmi_in->{tf});
+}
+
 sub get_cid {
     my $sys = shift;
 
     return $cid[$sys] if $cid[$sys];
 
     my $req = mk_qmi(0, 0, 0x0022, {0x01 => pack("C*", $sys)});
-    my $ret = send_and_recv($req);
 
+restart:
+    my $ret = send_and_recv($req);
     my $status = verify_status($ret);
     if (!$status && $ret->{tlvs}{0x01}[0] == $sys) {
 	$cid[$sys] = $ret->{tlvs}{0x01}[1];
     } else {
+	if ($status == 0x0005) { # QMI_ERR_CLIENT_IDS_EXHAUSTED
+	    if (!&ctl_sync) { # reset to clean state
+		goto restart;
+	    }
+	}
 	warn "$netdev: CID request for $sysname{$sys} failed: $err{$status}\n";
     }
-    
     return $cid[$sys];
 }
 
@@ -456,9 +519,9 @@ sub wds_start_network_interface {
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
     $tlv{0x18} = $pw if $pw;
-
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
+    warn "$netdev: connecting...\n" if $verbose;
     # need to save handle (and WMS CID!!!) for disconnect
     my $ret = send_and_recv($req, 60);
     my $status = verify_status($ret);
@@ -478,6 +541,7 @@ sub wds_start_network_interface {
 
 ### 2. verify and optionally enter PIN code ###
 
+
 sub dms_enter_pin {
     my $pinnumber = shift;
 
@@ -495,6 +559,10 @@ sub dms_enter_pin {
 	warn "$netdev: PIN$pinnumber verification failed: $err{$status}\n";
 	return undef;
     }
+
+    # wait for status to be updated
+    &wait_for_sync_ind(20);
+
     return 1;
 }
 
@@ -512,26 +580,26 @@ sub dms_verify_pin {
     my $req = mk_dms(0x002b); # QMI_DMS_UIM_GET_PIN_STATUS
     my %pinok;
 
-    if ($req) {
-	my $ret = send_and_recv($req);
-	return undef if (verify_status($ret));
+    my $ret = send_and_recv($req);
+    return undef if (verify_status($ret));
 
-	for (my $pin = 1; $pin <=2; $pin++) {
-	    my $tlv = $ret->{tlvs}{0x10 + $pin};
-	    next unless $tlv;
-	    warn "PIN$pin status: $pinstatus{$tlv->[0]}, verify_left: $tlv->[1], unblock_left: $tlv->[2]\n" if $verbose;
-	    $pinok{$pin} = 1 if ($tlv->[0] == 2 || $tlv->[0] == 3);
-	    if ($tlv->[0] == 1) { # enabled, not veriﬁed
-		if ($tlv->[1] >= 3) {
-		     $pinok{$pin} = &dms_enter_pin($pin);
-		} else {
-		    warn "$netdev: less than 3 verification attempts left for PIN$pin - must be entered manually!\n" if ($pin == 1 || $verbose);
-		}
+    for (my $pin = 1; $pin <=2; $pin++) {
+	my $tlv = $ret->{tlvs}{0x10 + $pin};
+	next unless $tlv;
+	warn "$netdev: PIN$pin status: $pinstatus{$tlv->[0]}, verify_left: $tlv->[1], unblock_left: $tlv->[2]\n" if $verbose;
+	$pinok{$pin} = ($tlv->[0] == 2 || $tlv->[0] == 3);
+	if ($tlv->[0] == 1) { # enabled, not veriﬁed
+	    if ($tlv->[1] >= 3) {
+		$pinok{$pin} = &dms_enter_pin($pin);
+	    } else {
+		warn "$netdev: less than 3 verification attempts left for PIN$pin - must be entered manually!\n" if ($pin == 1 || $verbose);
 	    }
 	}
     }
     return $pinok{1};  # we only really care about PIN1
 }
+
+
 
 sub dms_dump_msg {
     my $msgid = shift;
@@ -778,7 +846,7 @@ if ($cmd eq 'start') {
 	# FIXME: must wait for network registration before continuing
 	&wds_start_network_interface;
     } else {
-	warn "$netdev: cannot start with PIN verification\n";
+	warn "$netdev: cannot start without PIN verification\n";
     }
 
 # stop interface?
