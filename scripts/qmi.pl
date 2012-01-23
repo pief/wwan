@@ -10,12 +10,17 @@ use constant {
     QMI_DMS => 2,
 };
 
+sub usage {
+    warn "Usage: $0 start|stop|status [iface]\n";
+    exit;
+}
+
 ### global variables ###
 
 # interface
 my $netdev = $ENV{'IFACE'};		# netdevice
 $netdev = $ARGV[1] if ($ARGV[1]);	# let command line override interface (e.g for status command)
-die "Unable to continue with no interface name\n" unless $netdev;
+&usage unless $netdev;
 my $state = "/etc/network/run/qmistate.$netdev"; # state keeping file
 
 # per interface config
@@ -25,7 +30,7 @@ my $user = $ENV{'WWAN_USER'};
 my $pw = $ENV{'WWAN_PW'};
 
 # output levels
-my $verbose = 0;
+my $verbose = 1;
 my $debug = 0;
 
 # internal state
@@ -174,7 +179,7 @@ sub get_mgmt_dev {
 	}
     }
     closedir(D);
-    warn "Will use $ret for management of $netdev\n" if ($ret && $verbose);
+    warn "$netdev: will use $ret for management\n" if ($ret && $verbose);
     return $ret;
 }
 
@@ -377,7 +382,7 @@ sub get_cid {
     if (!$status && $ret->{tlvs}{0x01}[0] == $sys) {
 	$cid[$sys] = $ret->{tlvs}{0x01}[1];
     } else {
-	warn "CID request for $sysname{$sys} failed: $err{$status}\n";
+	warn "$netdev: CID request for $sysname{$sys} failed: $err{$status}\n";
     }
     
     return $cid[$sys];
@@ -388,12 +393,12 @@ sub release_cids {
     for (my $sys = 0; $sys < scalar @cid; $sys++) {
 	if ($cid[$sys]) {
 	    if ($wds_handle && $sys == QMI_WDS) {
-		warn "not releasing QMI_WDS cid=$cid[$sys] while connected\n" if $verbose;
+		warn "$netdev: not releasing QMI_WDS cid=$cid[$sys] while connected\n" if $verbose;
 		next;
 	    }
 	    my $req = mk_qmi(0, 0, 0x0023, {0x01 => pack("C*", $sys, $cid[$sys])});
  	    my $ret = send_and_recv($req);
-	    warn "released cid=$cid[$sys] for sys=$sys with status=" . verify_status($ret) . "\n" if $verbose;
+	    warn "$netdev: released $sysname{$sys} cid=$cid[$sys] with status=" . verify_status($ret) . "\n" if $verbose;
 	    $cid[$sys] = 0;
 	}
     }
@@ -477,7 +482,7 @@ sub dms_enter_pin {
     my $pinnumber = shift;
 
     unless ($pin{$pinnumber}) {
-	warn "No PIN$pinnumber configured\n" if $verbose;
+	warn "$netdev: No PIN$pinnumber configured\n" if $verbose;
 	return undef;
     }
     my $pin = $pin{$pinnumber};
@@ -487,7 +492,7 @@ sub dms_enter_pin {
     my $ret = &send_and_recv($req);
     my $status = &verify_status($ret);
     if ($status) {
-	warn "PIN$pinnumber verification failed: $err{$status}\n";
+	warn "$netdev: PIN$pinnumber verification failed: $err{$status}\n";
 	return undef;
     }
     return 1;
@@ -520,7 +525,7 @@ sub dms_verify_pin {
 		if ($tlv->[1] >= 3) {
 		     $pinok{$pin} = &dms_enter_pin($pin);
 		} else {
-		    warn "less than 3 verification attempts left for PIN$pin - must be entered manually!\n" if ($pin == 1 || $verbose);
+		    warn "$netdev: less than 3 verification attempts left for PIN$pin - must be entered manually!\n" if ($pin == 1 || $verbose);
 		}
 	    }
 	}
@@ -741,18 +746,13 @@ sub status {
     map { warn "$netdev: $_: $call->{$_}\n" } keys %$call;
 }
 
-sub usage {
-    warn "Usage: $0 start|stop|status [iface]\n";
-    exit;
-}
-
-
 ### main ###
 
 # look up management character device
 $dev = &get_mgmt_dev($netdev);
 if (!$dev) {
-    die "$netdev: Cannot find a QMI management interface!\n";
+    warn "$netdev: Cannot find a QMI management interface!\n" if $verbose;
+    exit;
 }
 
 if (&is_at) {
@@ -767,8 +767,13 @@ if (!&is_qmi) {
 # get and verify cached data, so we can reuse the QMI_WDS CID at least
 &get_wds_state;
 
+my $cmd = $ENV{'PHASE'};
+$cmd ||= $ARGV[0];
+$cmd =~ s/^pre-up$/start/;
+$cmd =~ s/^post-down$/stop/;
+
 # start interface?
-if ($ARGV[0] eq 'start') {
+if ($cmd eq 'start') {
     if (&dms_verify_pin) {
 	# FIXME: must wait for network registration before continuing
 	&wds_start_network_interface;
@@ -777,11 +782,11 @@ if ($ARGV[0] eq 'start') {
     }
 
 # stop interface?
-} elsif ($ARGV[0] eq 'stop') {
+} elsif ($cmd eq 'stop') {
     &wds_stop_network_interface;
 
 # or just print status?
-} elsif ($ARGV[0] eq 'status') {
+} elsif ($cmd eq 'status') {
     &status;
 } else {
     &usage;
