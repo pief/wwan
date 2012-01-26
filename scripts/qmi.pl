@@ -12,7 +12,7 @@ use constant {
 
 ### functions used during enviroment variable parsing ###
 sub usage {
-    warn "Usage: $0 start|stop|status [iface]\n";
+    warn "Usage: $0 start|stop|status|reset [iface]\n";
     exit;
 }
 
@@ -156,6 +156,10 @@ my %sysname = (
     1 => "QMI_WDS",
     2 => "QMI_DMS",
     );
+
+
+
+    
 
 ### 1. find the associated QMI interface  ###
 #
@@ -369,17 +373,13 @@ sub send_and_recv {
     my $qmi_out = decode_qmi($cmd);
     pretty_print_qmi($qmi_out) if $debug;
 
-    open(F, "+<", $dev) || die "open $dev: $!\n";
-    autoflush F 1;
     print F $cmd;
 
     # set up for matching
     $qmi_out->{flags} = $qmi_out->{sys} ? 0x02 : 0x01; # response
     $qmi_out->{ctrl} = 0x80;  # service
     my $qmi_in = read_match($qmi_out, $timeout);
-    close(F);
-
-    pretty_print_qmi($qmi_in) if $debug;
+ 
     return $qmi_in;
 }
 
@@ -409,10 +409,6 @@ sub ctl_sync {
 sub wait_for_sync_ind {
     my $timeout = shift || 5;
 
-    # read until satisfied
-    open(F, $dev) || die "open $dev: $!\n";
-    autoflush F 1;
-
     # set up for matching
     my $match = {
 	tf => 1,
@@ -423,7 +419,6 @@ sub wait_for_sync_ind {
 	msgid => 0x0027,
     };
     my $qmi_in = read_match($match, $timeout);
-    close(F);
 
     return exists($qmi_in->{tf});
 }
@@ -514,6 +509,81 @@ sub wds_stop_network_interface {
     return $err{&verify_status($ret)};
 }
 
+
+my %call_end_reason = (
+    1 => { # Mobile IP
+    },
+    2 => { # Internal
+	201 => 'INTERNAL_ERROR',
+	202 => 'CALL_ENDED',
+	203 => 'INTERNAL_UNKNOWN_CAUSE_CODE',
+	204 => 'UNKNOWN_CAUSE_CODE',
+	205 => 'CLOSE_IN_PROGRESS',
+	206 => 'NW_INITIATED_TERMINATION',
+	207 => 'APP_PREEMPTED',
+    },
+    3 => { # Call Manager deﬁned
+    },
+    6 => { #  3GPP speciﬁcation deﬁned
+	8  => 'OPERATOR_DETERMINED_BARRING',
+	25 => 'LLC_SNDCP_FAILURE',
+	26 => 'INSUFFICIENT_RESOURCES',
+	27 => 'UNKNOWN_APN',
+	28 => 'UNKNOWN_PDP',
+	29 => 'AUTH_FAILED',
+	30  => 'GGSN_REJECT',
+	31  => 'ACTIVATION_REJECT',
+	32  => 'OPTION_NOT_SUPPORTED',
+	33  => 'OPTION_UNSUBSCRIBED',
+	34  => 'OPTION_TEMP_OOO',
+	35  => 'NSAPI_ALREADY_USED',
+	36  => 'REGULAR_DEACTIVATION',
+	37  => 'QOS_NOT_ACCEPTED',
+	38  => 'NETWORK_FAILURE',
+	39  => 'UMTS_REACTIVATION_REQ',
+	40  => 'FEATURE_NOT_SUPPORTED',
+	41  => 'TFT_SEMANTIC_ERROR',
+	42  => 'TFT_SYNTAX_ERROR',
+	43  => 'UNKNOWN_PDP_CONTEXT',
+	44  => 'FILTER_SEMANTIC_ERROR',
+	45  => 'FILTER_SYNTAX_ERROR',
+	46  => 'PDP_WITHOUT_ACTIVE_TFT',
+	81  => 'INVALID_TRANSACTION_ID',
+	95  => 'MESSAGE_INCORRECT_SEMANTIC',
+	96  => 'INVALID_MANDATORY_INFO',
+	97  => 'MESSAGE_TYPE_UNSUPPORTED',
+	98  => 'MSG_TYPE_NONCOMPATIBLE_STATE',
+	99  => 'UNKNOWN_INFO_ELEMENT',
+	100 => 'CONDITIONAL_IE_ERROR',
+	101 => 'MSG_AND_PROTOCOL_STATE_UNCOMPATIBLE',
+	111 => 'PROTOCOL_ERROR',
+	112 => 'APN_TYPE_CONFLICT',
+	50  => 'IP_V4_ONLY_ALLOWED',
+	51  => 'IP_V6_ONLY_ALLOWED',
+	52  => 'SINGLE_ADDR_BEARER_ONLY',
+	53  => 'ESM_INFO_NOT_RECEIVED',
+	54  => 'PDN_CONN_DOES_NOT_EXIST',
+	55  => 'MULTI_CONN_TO_SAME_PDN_NOT_ALLOWED',
+    },
+    7 => { #  PPP
+    },
+    8 => { #  EHRPD
+    },
+    9 => { #  IPv6
+    },
+    );
+
+sub call_end_reason {
+    my $qmi = shift;
+    my $v = $qmi->{tlvs}{0x11}; # Verbose Call End Reason
+    return 'unknown' unless $v;
+
+    my ($type, $reason) = unpack("v2", pack("C*", @$v)); 
+    return ($call_end_reason{$type}{$reason} || 'unknown') . " [type=$type, reason=$reason]";
+} 
+    
+
+
 sub wds_start_network_interface {
     my %tlv;
     $tlv{0x14} = $apn if $apn;
@@ -526,8 +596,8 @@ sub wds_start_network_interface {
     my $ret = send_and_recv($req, 60);
     my $status = verify_status($ret);
     if ($status) {
-	warn "Connection failed: $err{$status}\n";
-	pretty_print_qmi($ret);
+	warn "Connection failed: status=$err{$status}, reason=", call_end_reason($ret), "\n";
+#	pretty_print_qmi($ret);
 	return $status;
     }
 
@@ -577,11 +647,18 @@ my %pinstatus = (
     7 => "changed",
     );
 sub dms_verify_pin {
-    my $req = mk_dms(0x002b); # QMI_DMS_UIM_GET_PIN_STATUS
+    my $req = &mk_dms(0x002b); # QMI_DMS_UIM_GET_PIN_STATUS
     my %pinok;
 
-    my $ret = send_and_recv($req);
-    return undef if (verify_status($ret));
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if ($status) {
+	warn "$netdev: PIN verfication failed: $err{$status}\n";
+	if ($status == 0x0003) { # QMI_ERR_INTERNAL
+	    warn "$netdev: SIM card missing?\n";
+	}
+	return undef;
+    }
 
     for (my $pin = 1; $pin <=2; $pin++) {
 	my $tlv = $ret->{tlvs}{0x10 + $pin};
@@ -671,7 +748,6 @@ my %data_bearer = (
 0x0D => "HSDPA+ and HSUPA",
 0x0E => "DC_HSDPA+ and WCDMA",
 0x0F => "DC_HSDAP+ and HSUPA",
-0xFF => "Unknown",
 );
 
 sub wds_get_data_bearer_technology {
@@ -682,7 +758,7 @@ sub wds_get_data_bearer_technology {
 
     my $v = $ret->{tlvs}{0x01} if exists($ret->{tlvs}{0x01}); # Data Bearer Technology
     $v = $ret->{tlvs}{0x10} if exists($ret->{tlvs}{0x10}); # Last Call Data Bearer Technology
-    return $data_bearer{$v->[0]};
+    return $data_bearer{$v->[0]} || sprintf ' unknown [0x%02x]', $v->[0];
 }
 
 sub tlv01_ascii {
@@ -694,9 +770,11 @@ sub tlv01_ascii {
 }
 
 sub wds_reset {
-    my $ret = send_and_recv(mk_wds(0x0000));
-    pretty_print_qmi($ret);
+    my $ret = &send_and_recv(&mk_wds(0x0000)); # QMI_WDS_RESET
+    $wds_handle = 0; # all WDS variables will be reset, but client IDs are still valid
+    return &verify_status($ret);
 }
+
 
 sub save_wds_state {
     if (open(X, ">$state")) {
@@ -772,8 +850,6 @@ sub is_qmi {
 
 # detect whether device management interface talks AT
 sub is_at {
-    open(F, "+<", $dev) || die "open $dev: $!\n";
-    autoflush F 1;
     print F "ATI\r\n";
     warn("reading from $dev\n") if $debug;
     my $r = '';
@@ -793,7 +869,6 @@ sub is_at {
     if ($@) {
 	die unless $@ eq "alarm\n";   # propagate unexpected errors
     }
-    close(F);
     return ($r =~ /OK/);
 }
 
@@ -819,9 +894,14 @@ sub status {
 # look up management character device
 $dev = &get_mgmt_dev($netdev);
 if (!$dev) {
-    warn "$netdev: Cannot find a QMI management interface!\n" if $verbose;
+    warn "$netdev: Cannot find a QMI management interface!\n" if $debug;
     exit;
 }
+
+# open it now and keep it open until exit
+open(F, "+<", $dev) || die "open $dev: $!\n";
+autoflush F 1;
+
 
 if (&is_at) {
     die "$netdev: no support for AT command $dev yet\n";
@@ -831,6 +911,8 @@ if (&is_at) {
 if (!&is_qmi) {
     die "$netdev: unable to detect $dev protocol\n";
 }
+
+&device_info if $verbose;
 
 # get and verify cached data, so we can reuse the QMI_WDS CID at least
 &get_wds_state;
@@ -856,6 +938,12 @@ if ($cmd eq 'start') {
 # or just print status?
 } elsif ($cmd eq 'status') {
     &status;
+} elsif ($cmd eq 'reset') {
+    warn "Resetting device state: ", $err{&ctl_sync}, "\n";
+} elsif ($cmd eq 'test') {
+    $debug = 1;
+    &send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), 0x15 => pack("C", 1)}));
+    $debug = 0;
 } else {
     &usage;
 }
@@ -865,6 +953,9 @@ if ($cmd eq 'start') {
 
 # release all releasable CIDs
 &release_cids;
+
+# close device
+close(F);
 
 __END__
 
@@ -888,6 +979,22 @@ __END__
 # 3. connect using specific APM
 # 4. save handle to net/run
 # 5. disconnect using saved handle
+
+Connection failed: QMI_ERR_CALL_FAILED
+<= QMUX Header:
+<=   len:    0x001f
+<=   sender: 0x80
+<=   svc:    0x01
+<=   cid:    0x06
+
+<= QMI Header:
+<=   Flags:  0x02
+<=   TXN:    0x0008
+<=   Cmd:    0x0020
+<=   Size:   0x0013
+<= [0x02] ( 4) 01 00 0e 00      FAILURE - QMI_ERR_CALL_FAILED
+<= [0x10] ( 2) 01 00    ..
+<= [0x11] ( 4) 02 00 cc 00      ....
 
 
 Insufficient resources:
