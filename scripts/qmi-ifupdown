@@ -28,9 +28,9 @@ use constant {
     QMI_DMS => 2,
 };
 
-#
-my $verbose = 1;
-my $debug = 0;
+# output control
+my $verbose = $ENV{'VERBOSITY'};
+my $debug = $ENV{'IF_WWAN_DEBUG'};
 
 # this is required
 my $netdev = $ENV{'IFACE'} || die "No IFACE environment variable\n";
@@ -60,7 +60,8 @@ my $wds_handle;		# connection handle
 
 
 sub strip_quotes {
-    return $_[0] ? $_[0] =~ s/"([^"]*)"/$1/ : '';
+    my ($stripped) = $_[0] ? ($_[0] =~ /^"?([^"]*)"?$/) : ('');
+    return $stripped;
 }
 
 sub debug_print {
@@ -326,7 +327,7 @@ sub wds_start_network_interface {
 
     my $v = $ret->{tlvs}{0x01};
     $wds_handle = unpack("V*", pack("C*", @$v)); # save as a 32bit integer
-    printf STDERR "$netdev: got QMI_WDS handle 0x%08x\n", $wds_handle;
+    printf STDERR "$netdev: got QMI_WDS handle 0x%08x\n", $wds_handle if $verbose;
 
     return $status;
 }
@@ -370,6 +371,7 @@ sub dms_enter_pin {
 	warn "$netdev: No PIN configured\n" if $verbose;
 	return undef;
     }
+
     my $req = &mk_dms(0x0028,  # QMI_DMS_UIM_VERIFY_PIN
 		      { 0x01 => pack("C*", 1, length($pin)) . $pin});
     
