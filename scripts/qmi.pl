@@ -10,9 +10,97 @@ use constant {
     QMI_DMS => 2,
 };
 
+package QMI::WDS;
+
+my %msg = (
+    0x0001 => {
+	name => 'SET_EVENT_REPORT',
+	0x16 => {
+	    name => 'Channel Rate',
+	    decode => sub { sprintf "tx: %u, rx: %u", unpack("vv", pack("C*", shift));  },
+	},
+	0x1d => {
+	    name => 'Current Data Bearer Technology',
+	    decode => \&tlv_data_bearer,
+	},
+    },
+    0x002d => {
+	name => 'GET_RUNTIME_SETTINGS',
+	0x15 => {
+	    name => 'Primary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x16 => {
+	    name => 'Secondary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x1e => {
+	    name => 'Preferred IPv4 address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x20 => {
+	    name => 'Gateway address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x21 => {
+	    name => 'Subnet mask',
+	    decode => \&tlv_ipv4addr,
+	},
+    },
+    );
+
+sub tlv_ipv4addr {
+    my $data = shift;
+    return join('.', reverse(@$data));
+}
+
+my %current_nw_map = (
+    0 => 'UNKNOWN',
+    1 => '3GPP2',
+    2 => '3GPP',
+    );
+
+my %rat_mask_map = (
+    0x01 => 'WCDMA',
+    0x02 => 'GPRS',
+    0x04 => 'HSDPA',
+    0x08 => 'HSUPA',
+    0x10 => 'EDGE',
+    0x20 => 'LTE',
+    0x40 => 'HSDPA+',
+    0x80 => 'DC_HSDPA+',
+    );
+
+sub tlv_data_bearer {
+    my $data = shift;
+    my ($current_nw, $rat_mask, $so_mask) = unpack("CVV", pack("C*", @$data));
+    my @rat;
+    for (my $i = 0; $i < 32; $i++) {
+	push(@rat, $rat_mask_map{1<<$i} || 'unknown') if ($rat_mask & 1<<$i);
+    }
+
+    return "$current_nw_map{$current_nw}: ".join('|', @rat);
+}
+
+sub tlv {
+    my ($msgid, $tlv, $data) = @_;
+    
+    if (exists($msg{$msgid}) && exists($msg{$msgid}->{$tlv})) {
+	return &{$msg{$msgid}->{$tlv}{decode}}($data);
+    }
+    return ''; # => default handling
+}
+
+
+1; # eof QMI::WDS;
+
+package main;
+
 ### functions used during enviroment variable parsing ###
 sub usage {
-    warn "Usage: $0 start|stop|status|reset [iface]\n";
+    warn "Usage: $0 start|stop|status|reset|monitor [iface]\n";
+    warn "Test usage: $0 test iface msgid\n";
+    &release_cids;
     exit;
 }
 
@@ -156,9 +244,6 @@ my %sysname = (
     1 => "QMI_WDS",
     2 => "QMI_DMS",
     );
-
-
-
     
 
 ### 1. find the associated QMI interface  ###
@@ -216,37 +301,23 @@ sub mk_qmi {
     
 sub decode_qmi {
     my $packet = shift;
-
     return {} unless $packet;
 
     printf "%02x " x length($packet) . "\n", unpack("C*", $packet) if $debug;
 
-    my ($tf, $len, $ctrl, $sys, $cid) = unpack("CvCCC", $packet);
-    return {} unless ($tf == 1);
+    my $ret = {};
+    @$ret{'tf','len','ctrl','sys','cid'} = unpack("CvCCC", $packet);
+    return {} unless ($ret->{tf} == 1);
 
-    my ($flags, $tid, $msgid, $tlvlen, $tlvs);
-    if ($sys != 0) {
-	($flags, $tid, $msgid, $tlvlen) = unpack("Cvvv", substr($packet, 6));
-	$tlvs = substr($packet, 13);
-    } else {
-	($flags, $tid, $msgid, $tlvlen) = unpack("CCvv", substr($packet, 6));
-	$tlvs = substr($packet, 12);
-    }
-
-    my $ret = { tf => $tf,
-		len => $len,
-		ctrl => $ctrl,
-		sys => $sys,
-		cid => $cid,
-		flags => $flags,
-		tid => $tid,
-		msgid => $msgid,
-		tlvlen => $tlvlen,};
+    # tid is 1 byte for QMI_CTL and 2 bytes for the others...
+    @$ret{'flags','tid','msgid','tlvlen'} = unpack($ret->{sys} == QMI_CTL ? "CCvv" : "Cvvv" , substr($packet, 6));
+    my $tlvlen = $ret->{'tlvlen'};
+    my $tlvs = substr($packet, $ret->{'sys'} == QMI_CTL ? 12 : 13 );
 
     # add the tlvs
      while ($tlvlen > 0) {
 	my ($tlv, $len) = unpack("Cv", $tlvs);
-	$ret->{tlvs}{$tlv} = [ unpack("C*", substr($tlvs, 3, $len)) ];
+	$ret->{'tlvs'}{$tlv} = [ unpack("C*", substr($tlvs, 3, $len)) ];
 	$tlvlen -= $len + 3;
 	$tlvs = substr($tlvs, $len + 3);
      }
@@ -289,14 +360,12 @@ sub pretty_print_qmi {
 	# special casing status
 	if ($k == 0x02) {
 	    $txt = ($v->[0] ? "FAILURE" : "SUCCESS") . " - " . $err{unpack("v", pack("C*", @$v[2..3]))};
-	} else {
-	    $txt = mk_ascii($v);
+	} elsif ($qmi->{sys} == QMI_WDS) {
+	    $txt = QMI::WDS::tlv($qmi->{msgid}, $k, $v);
 	}
+	$txt ||= mk_ascii($v);
 
 	printf "${pfx}[0x%02x] (%2d) " . "%02x " x $tlvlen . "\t$txt\n", $k, $tlvlen, @$v;
-#	printf "\n  TLV:    0x%02x\n", $k; # (WDS/Get Packet Service Status Response/Result Code)
-#	printf "  Size:   0x%04x\n", $tlvlen;
-#	printf "  Data:   ". "%02x " x $tlvlen . "\n", @$v;
     }
 }
 
@@ -323,9 +392,10 @@ sub read_match {
 	my $found;
 	alarm $timeout;
 	do {
+	    my $len = 0;
 	    if (!$raw) {
-		my $len = sysread(F, $raw, 256);
-		warn("read $len bytes from $dev\n") if $debug;
+		$len = sysread(F, $raw, 256);
+		warn("read $len bytes from $dev\n") if ($debug && $len);
 	    } else {
 		warn "$netdev: last read return multiple packets\n" if $verbose;
 	    }
@@ -340,7 +410,7 @@ sub read_match {
 	    }
 
 	    # matching reply?
-	    $found = &qmi_match($match, $qmi_in);
+	    $found = !$len || &qmi_match($match, $qmi_in);
 	    if (!$found && $debug) {
 		warn "skipping unrelated message\n";
  	    }
@@ -355,9 +425,11 @@ sub read_match {
     return  $qmi_in;
 }
 
+# infinite timeout and impossible match => read forever
+sub monitor {
+    &read_match({}, 0);
+}
 
-# FIXME: needs to verify that the received packet is the answer
-# FIXME: needs timeout
 sub send_and_recv {
     my $cmd = shift;
     my $timeout = shift || 5;
@@ -472,12 +544,6 @@ sub mk_dms {
     my $cid = get_cid(QMI_DMS);
     return undef if (!$cid);
     return mk_qmi(QMI_DMS, $cid, @_);
-}
-
-sub wds_get_runtime_settings {
-    my $req = mk_wds(0x002d); # QMI_WDS_GET_RUNTIME_SETTINGS
-    my $ret = send_and_recv($req);
-    pretty_print_qmi($ret);
 }
 
 my %srvc_status = (
@@ -912,6 +978,10 @@ if (!&is_qmi) {
     die "$netdev: unable to detect $dev protocol\n";
 }
 
+# at this point we'd like to ensure that CIDs are released
+$SIG{TERM} = \&release_cids;
+$SIG{INT} = \&release_cids;
+
 &device_info if $verbose;
 
 # get and verify cached data, so we can reuse the QMI_WDS CID at least
@@ -940,9 +1010,23 @@ if ($cmd eq 'start') {
     &status;
 } elsif ($cmd eq 'reset') {
     warn "Resetting device state: ", $err{&ctl_sync}, "\n";
-} elsif ($cmd eq 'test') {
+} elsif ($cmd eq 'monitor') {
     $debug = 1;
-    &send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), 0x15 => pack("C", 1)}));
+    &send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
+				    0x15 => pack("C", 1), # Current Data Bearer Technology Indicator
+				    0x17 => pack("C", 1), # Data Call Status Change Indicator
+			   }));
+    &monitor;
+    $debug = 0;
+} elsif ($cmd eq 'test' && $ARGV[2]) {
+    $debug = 1;
+    my $msgid = $ARGV[2];
+    if ($msgid =~ s/^0x//) {
+	$msgid = hex($msgid);
+    } else {
+	&usage;
+    }
+    &send_and_recv(&mk_wds($msgid));
     $debug = 0;
 } else {
     &usage;
@@ -957,63 +1041,3 @@ if ($cmd eq 'start') {
 # close device
 close(F);
 
-__END__
-
-
-## freeing all possible CIDs
-for (my $i = 2; $i < 50; $i++) {
-    $cid[QMI_WDS] = $i;
-    $cid[QMI_DMS] = $i;
-    &release_cids;
-}
-
-
-## another option:
-## QMI_CTL SYNC (0x0027) seems to clear everything...
-
-
-__END__
-
-
-
-# 3. connect using specific APM
-# 4. save handle to net/run
-# 5. disconnect using saved handle
-
-Connection failed: QMI_ERR_CALL_FAILED
-<= QMUX Header:
-<=   len:    0x001f
-<=   sender: 0x80
-<=   svc:    0x01
-<=   cid:    0x06
-
-<= QMI Header:
-<=   Flags:  0x02
-<=   TXN:    0x0008
-<=   Cmd:    0x0020
-<=   Size:   0x0013
-<= [0x02] ( 4) 01 00 0e 00      FAILURE - QMI_ERR_CALL_FAILED
-<= [0x10] ( 2) 01 00    ..
-<= [0x11] ( 4) 02 00 cc 00      ....
-
-
-Insufficient resources:
-
-[0x14] (13) 70 69 6c 6f 74 2e 74 65 6c 65 6e 6f 72      pilot.telenor
-QMUX Header:
-  len:    0x001f
-  sender: 0x80
-  svc:    0x01
-  cid:    0x49
-
-QMI Header:
-  Flags:  0x02
-  TXN:    0x0002
-  Cmd:    0x0020
-  Size:   0x0013
-[0x02] ( 4) 01 00 0e 00         FAILURE - QMI_ERR_CALL_FAILED
-[0x10] ( 2) ed 03       ..
-[0x11] ( 4) 06 00 1a 00         ....
-
-
-wds_reset hjelper...
