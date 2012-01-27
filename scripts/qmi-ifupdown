@@ -1,0 +1,479 @@
+#!/usr/bin/perl
+#
+# /etc/network/if-pre-up.d/qmi
+# /etc/network/if-post-down.d/qmi
+#
+# Copyright 2012 Bjørn Mork <bjorn@mork.no>
+#
+# This script is an addition to Debian's ifupdown and establishes wwan
+# connection using the Qualcomm propietary QMI protocol
+#
+# Place this file in /etc/network/if-pre-up.d/ and create a symlink to
+# /etc/network/if-post-down.d/
+# 
+# The wwan interface is configured like this, where all variables are
+# optional unless required by your subscription
+#
+# iface wwan0 inet dhcp
+#   wwan_pin  "1234"
+#   wwan_apn  "my.provider.apn"
+#   wwan_user "username"
+#   wwan_pw   "password"
+
+use strict;
+use warnings;
+use constant {
+    QMI_CTL => 0,
+    QMI_WDS => 1,
+    QMI_DMS => 2,
+};
+
+#
+my $verbose = 1;
+my $debug = 0;
+
+# this is required
+my $netdev = $ENV{'IFACE'} || die "No IFACE environment variable\n";
+my $cmd;
+if ($ENV{'PHASE'} eq 'pre-up') {
+    $cmd = 'start';
+} elsif ($ENV{'PHASE'} eq 'post-down') {
+    $cmd = 'stop';
+} else {
+    exit 0;
+}
+
+# need to keep some external state
+my $state = "/etc/network/run/qmistate.$netdev";
+
+# per interface config
+my $pin  = &strip_quotes($ENV{'IF_WWAN_PIN'});
+my $apn  = &strip_quotes($ENV{'IF_WWAN_APN'});
+my $user = &strip_quotes($ENV{'IF_WWAN_USER'});
+my $pw   = &strip_quotes($ENV{'IF_WWAN_PW'});
+
+# internal state
+my $dev;		# management device
+my @cid;		# array of allocated CIDs
+my $tid = 1;		# transaction id
+my $wds_handle;		# connection handle
+
+
+sub strip_quotes {
+    return $_[0] ? $_[0] =~ s/"([^"]*)"/$1/ : '';
+}
+
+sub debug_print {
+    my ($pfx, $packet) = @_;
+    printf STDERR $pfx . " %02x" x length($packet) . "\n", unpack("C*", $packet);
+}
+
+# use the first cdc-wdmX dev on the same USB device as IFACE for mgmt
+sub get_mgmt_dev {
+    my $ret = '';
+    my $usbdev = readlink("/sys/class/net/$netdev/device");
+    $usbdev =~ s!.*/([^:]*):.*!$1!; # ../../../2-1:1.4
+    return $ret if (!$usbdev);
+
+    opendir(D, "/sys/class/usb") || return $ret;
+    while (my $f = readdir(D)) { # cdc-wdm0 -> ../../devices/pci0000:00/0000:00:1d.7/usb2/2-1/2-1:1.3/usb/cdc-wdm0
+	next unless ($f =~ /^cdc-wdm/);
+	if (readlink("/sys/class/usb/$f") =~ m!/$usbdev/$usbdev:.*/usb/cdc-wdm!) { # found it!
+	    $ret = "/dev/$f";
+	    last;
+	}
+    }
+    closedir(D);
+    return $ret;
+}
+
+
+### QMI helpers ###
+# $tlvs = { type1 => packdata, type2 => packdata, .. 
+sub mk_qmi {
+    my ($sys, $cid, $msgid, $tlvs) = @_;
+
+    # create tlvbytes
+    my $tlvbytes = '';
+    foreach my $tlv (keys %$tlvs) {
+	$tlvbytes .= pack("Cv", $tlv, length($tlvs->{$tlv})) . $tlvs->{$tlv};
+    }
+
+    # create message
+    my $tlvlen = length($tlvbytes);
+    if ($sys != QMI_CTL) {
+	return pack("CvCCCCvvv", 1, 12 + $tlvlen, 0, $sys, $cid, 0, $tid++, $msgid, $tlvlen) . $tlvbytes;
+    } else {
+	return pack("CvCCCCCvv", 1, 11 + $tlvlen, 0, QMI_CTL, 0, 0, $tid++, $msgid, $tlvlen) . $tlvbytes;
+    }
+}
+
+# decode packet into hash     
+sub decode_qmi {
+    my $packet = shift || return {};
+    my $ret = {};
+    @$ret{'tf','len','ctrl','sys','cid'} = unpack("CvCCC", $packet);
+
+    # sanity check
+    return {} unless ($ret->{tf} == 1);
+
+    # tid is 1 byte for QMI_CTL and 2 bytes for the others...
+    @$ret{'flags','tid','msgid','tlvlen'} = unpack($ret->{sys} == QMI_CTL ? "CCvv" : "Cvvv" , substr($packet, 6));
+    my $tlvlen = $ret->{'tlvlen'};
+    my $tlvs = substr($packet, $ret->{'sys'} == QMI_CTL ? 12 : 13 );
+
+    # unpack the tlvs
+     while ($tlvlen > 0) {
+	my ($tlv, $len) = unpack("Cv", $tlvs);
+	$ret->{'tlvs'}{$tlv} = [ unpack("C*", substr($tlvs, 3, $len)) ];
+	$tlvlen -= $len + 3;
+	$tlvs = substr($tlvs, $len + 3);
+     }
+    return $ret;
+}
+
+# check if two QMI messages are part of the same transaction
+sub qmi_match {
+    my ($q1, $q2) = @_;
+
+    for my $f (qw(tf ctrl flags sys cid msgid)) {
+	return undef unless (exists($q1->{$f}) && exists($q2->{$f}) && $q1->{$f} == $q2->{$f});
+    }
+    return 1;
+}
+
+# read from the already open F until match or timeout
+sub read_match {
+    my $match = shift;
+    my $timeout = shift;
+
+    my $qmi_in = {};
+    eval {
+	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
+	my $raw;
+	my $found;
+	alarm $timeout;
+	do {
+	    if (!$raw) {
+		my $len = sysread(F, $raw, 256);
+		$found = 1 if !$len; # break out of loop in signal
+		&debug_print("<<", $raw) if $debug;
+	    }
+
+	    $qmi_in = &decode_qmi($raw);
+
+	    # a single read may return more than one packet!
+	    if ($qmi_in->{tf}) {
+		$raw = substr($raw, $qmi_in->{len} + 1);
+	    } else {
+		$raw = '';
+	    }
+
+	    # matching reply?
+	    $found ||= &qmi_match($match, $qmi_in);
+	} while (!$found);
+	alarm 0;
+    };
+    if ($@) {
+	die unless $@ eq "alarm\n";   # propagate unexpected errors
+    }
+    return  $qmi_in;
+}
+
+# send $cmd to the already open F and wait for a reply
+sub send_and_recv {
+    my $cmd = shift;
+    my $timeout = shift || 5;
+    return {} unless $cmd;
+
+    &debug_print(">>", $cmd) if $debug;
+    print F $cmd;
+
+    # set up for matching
+    my $qmi_out = &decode_qmi($cmd);
+    $qmi_out->{flags} = $qmi_out->{sys} ? 0x02 : 0x01; # response
+    $qmi_out->{ctrl} = 0x80;  # service
+    my $qmi_in = &read_match($qmi_out, $timeout);
+ 
+    return $qmi_in;
+}
+
+# get status TLV error code
+sub verify_status {
+    my $qmi = shift;
+    return 1 if ((ref($qmi) ne "HASH") || !exists($qmi->{tf}));         # QMI_ERR_MALFORMED_MSG 
+    return 0 if (!exists($qmi->{tlvs}) || !exists($qmi->{tlvs}{0x02})); # QMI_ERR_NONE
+    return unpack("v", pack("C*", @{$qmi->{tlvs}{0x02}}[2..3]));
+}
+
+
+## QMI_CTL commands
+
+# allocate a client ID for $sys
+sub get_cid {
+    my $sys = shift;
+    return $cid[$sys] if $cid[$sys];
+
+    # QMI_CTL request client ID
+    my $req = &mk_qmi(QMI_CTL, 0, 0x0022, {0x01 => pack("C*", $sys)});
+
+restart:
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if (!$status && $ret->{tlvs}{0x01}[0] == $sys) {
+	$cid[$sys] = $ret->{tlvs}{0x01}[1];
+    } else {
+	if ($status == 0x0005) { # QMI_ERR_CLIENT_IDS_EXHAUSTED
+	    if (!&ctl_sync) { # reset to clean state
+		goto restart;
+	    }
+	}
+	warn "$netdev: CID request for sys=$sys failed: $status\n";
+    }
+    return $cid[$sys];
+}
+
+# release all CIDs with the possible exception of QMI_WDS if we started a connection
+sub release_cids {
+    for (my $sys = 0; $sys < scalar @cid; $sys++) {
+	if ($cid[$sys]) {
+	    if ($wds_handle && $sys == QMI_WDS) {
+		warn "$netdev: not releasing QMI_WDS cid=$cid[$sys] while connected\n" if $verbose;
+		next;
+	    }
+	    my $req = &mk_qmi(QMI_CTL, 0, 0x0023, {0x01 => pack("C*", $sys, $cid[$sys])});
+ 	    my $ret = &send_and_recv($req);
+	    printf STDERR "$netdev: released sys=$sys cid=$cid[$sys] with status=0x%04x\n",  &verify_status($ret) if $verbose;
+	    $cid[$sys] = 0;
+	}
+    }
+}
+
+# sending a QMI_CTL SYNC message will release all allocated CIDs and
+# therefore also disconnect device!
+sub ctl_sync {
+    my $req = &mk_qmi(QMI_CTL, 0, 0x0027);
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if (!$status) {
+	# reset all cached state as it is now invalid
+	@cid = ();
+	$wds_handle = 0;
+    }
+    return $status;
+}
+
+# will receive a QMI_CTL sync notification when device is ready after
+# PIN verification
+sub wait_for_sync_ind {
+    my $timeout = shift || 5;
+
+    # set up for matching
+    my $match = {
+	tf => 1,
+	sys => 0,
+	cid => 0,
+	flags => 0x02,
+	ctrl => 0x80,
+	msgid => 0x0027,
+    };
+    my $qmi_in = &read_match($match, $timeout);
+
+    return exists($qmi_in->{tf});
+}
+
+sub mk_wds {
+    my $cid = &get_cid(QMI_WDS);
+    return undef if (!$cid);
+    return &mk_qmi(QMI_WDS, $cid, @_);
+}
+
+sub mk_dms {
+    my $cid = &get_cid(QMI_DMS);
+    return undef if (!$cid);
+    return &mk_qmi(QMI_DMS, $cid, @_);
+}
+
+## QMI_WDS commands
+
+# QMI_WDS 0x0020
+sub wds_start_network_interface {
+    # check PIN status first
+    if (!&dms_verify_pin) {
+	warn "$netdev: cannot connect without PIN verification\n";
+	return 1;
+    }
+
+    my %tlv;
+    $tlv{0x14} = $apn if $apn;
+    $tlv{0x17} = $user if $user;
+    $tlv{0x18} = $pw if $pw;
+    my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
+
+    warn "$netdev: connecting...\n" if $verbose;
+    # need to save handle (and WMS CID!!!) for disconnect
+    my $ret = &send_and_recv($req, 60);
+    my $status = &verify_status($ret);
+    if ($status) {
+	my $v = $ret->{tlvs}{0x11}; # Verbose Call End Reason
+	if ($v) {
+	    printf STDERR "$netdev: connection failed - status=0x%04x, type=0x%04x, reason=%04x\n", $status, unpack("v2", pack("C*", @$v));
+	} else {
+	    printf STDERR "$netdev: connection failed - status=0x%04x\n", $status;
+	}
+	return $status;
+    }
+
+    my $v = $ret->{tlvs}{0x01};
+    $wds_handle = unpack("V*", pack("C*", @$v)); # save as a 32bit integer
+    printf STDERR "$netdev: got QMI_WDS handle 0x%08x\n", $wds_handle;
+
+    return $status;
+}
+
+# QMI_WDS 0x0021
+sub wds_stop_network_interface {
+    return 1 if !$wds_handle; # cannot disconnect without a valid handle
+
+    my $req = mk_wds(0x0021, { 0x01 => pack("V", $wds_handle) } ); # QMI_WDS_STOP_NETWORK_INTERFACE
+    my $ret = &send_and_recv($req);
+    $wds_handle = 0; # reset handle to allow releasing the CID
+    return &verify_status($ret);
+}
+
+# QMI_WDS 0x0022
+sub wds_get_pkt_srvc_status {
+    my $ret = &send_and_recv(&mk_wds(0x0022), 2); # QMI_WDS_GET_PKT_SRVC_STATUS,  short timeout
+    my $status = verify_status($ret);
+    if ($status) {
+	warn "$netdev: wds_get_pkt_srvc_status: $status\n" if $verbose;
+	return 0;
+    }
+    my $v = $ret->{tlvs}{0x01};
+    return $v ? $v->[0] : 0;
+}
+
+## QMI_DMS commands
+
+# QMI_DMS 0x0023
+sub dms_get_device_rev_id {
+    my $ret = &send_and_recv(&mk_dms(0x0023)); # QMI_DMS_GET_DEVICE_REV_ID
+    my $v = $ret->{tlvs}{0x01};
+    return '' if (!$v);
+    return pack("C*", @$v);
+}
+
+
+# QMI_DMS 0x0028
+sub dms_enter_pin {
+    unless ($pin) {
+	warn "$netdev: No PIN configured\n" if $verbose;
+	return undef;
+    }
+    my $req = &mk_dms(0x0028,  # QMI_DMS_UIM_VERIFY_PIN
+		      { 0x01 => pack("C*", 1, length($pin)) . $pin});
+    
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if ($status) {
+	warn "$netdev: PIN verification failed: $status\n";
+	return undef;
+    }
+
+    # wait for device to be ready
+    &wait_for_sync_ind(20);
+
+    return 1;
+}
+
+# QMI_DMS 0x002b - get SIM PIN status
+sub dms_verify_pin {
+    my $ret = &send_and_recv(&mk_dms(0x002b)); # QMI_DMS_UIM_GET_PIN_STATUS
+    my $status = &verify_status($ret);
+    if ($status) {
+	warn "$netdev: PIN verfication failed: $status\n";
+	warn "$netdev: SIM card missing?\n" if ($status == 0x0003); # QMI_ERR_INTERNAL
+	return undef;
+    }
+
+    my $tlv = $ret->{tlvs}{0x11}; # PIN1 (SIM PIN) status
+    warn "$netdev: PIN1 status: $tlv->[0], verify_left: $tlv->[1], unblock_left: $tlv->[2]\n" if $verbose;
+    return 1 if ($tlv->[0] == 2 || $tlv->[0] == 3); # "enabled, veriﬁed" or "disabled"
+
+    if ($tlv->[0] == 1) { # "enabled, not veriﬁed"
+	if ($tlv->[1] >= 3) { # requiring at least 3 remaining attempts
+	    return &dms_enter_pin;
+	} else {
+	    warn "$netdev: less than 3 verification attempts left for PIN1 - must be entered manually!\n" if $verbose;
+	}
+    }
+    return undef;
+}
+
+## external state management
+
+sub save_wds_state {
+    if (open(X, ">$state")) {
+	if ($wds_handle) {
+	    printf X "%u %u\n", $cid[QMI_WDS], $wds_handle;
+	}
+	close X;
+    } else {
+	warn "$netdev: FATAL: cannot open \"$state\": $!\n";
+	$wds_handle = 0; # will cause disconnect when CID is released
+    }
+}
+
+sub read_wds_state {
+    if (!open(X, $state)) { # this is to be expected if we never saved any...
+	warn "$netdev: unable to open $state: $!\n" if $debug;
+	return;
+    }
+    my $x = <X>;
+    close X;
+    ($cid[QMI_WDS], $wds_handle) = split(/ /, $x) if $x;
+
+    # verify that the state is valid
+    my $conn = &wds_get_pkt_srvc_status;
+    if ($conn != 2) { # CONNECTED;
+	$wds_handle = 0; # handle is invalid
+    }
+    if (!$conn) {
+	$cid[QMI_WDS] = 0;  # CID is invalid
+    }
+    printf STDERR "$netdev: QMI_WDS cid=%u, wds_handle=0x%08x\n", $cid[QMI_WDS], $wds_handle if $verbose;
+}
+
+# restore sane state on exit
+sub exit_proc {
+    &save_wds_state; # save state for next run
+    &release_cids;   # release all releasable CIDs
+    close(F);        # close device
+}
+
+## main
+
+# locate the (possibly QMI) management character device
+$dev = &get_mgmt_dev || exit 0;
+warn "$netdev: will use $dev for management\n" if $verbose;
+
+# open character device
+open(F, "+<", $dev) || die "open $dev: $!\n";
+autoflush F 1;
+
+# at this point we'd like to ensure that CIDs are released on exit
+$SIG{TERM} = \&exit_proc;
+$SIG{INT} = \&exit_proc;
+
+# verify that it speaks QMI
+my $revid = &dms_get_device_rev_id || exit 0;
+warn "$netdev: revision: $revid\n" if $verbose;
+
+# get and verify cached data, so we can reuse the QMI_WDS CID at least
+&read_wds_state;
+
+&wds_start_network_interface if ($cmd eq 'start');
+&wds_stop_network_interface if ($cmd eq 'stop');
+&exit_proc;
+
+
