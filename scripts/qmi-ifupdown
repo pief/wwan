@@ -19,6 +19,8 @@
 #   wwan_apn  "my.provider.apn"
 #   wwan_user "username"
 #   wwan_pw   "password"
+#   # enable script debugging
+#   wwan_debug 1
 
 use strict;
 use warnings;
@@ -443,6 +445,7 @@ sub read_wds_state {
     if (!$conn) {
 	$cid[QMI_WDS] = 0;  # CID is invalid
     }
+    $wds_handle ||= 0;
     printf STDERR "$netdev: QMI_WDS cid=%u, wds_handle=0x%08x\n", $cid[QMI_WDS], $wds_handle if $verbose;
 }
 
