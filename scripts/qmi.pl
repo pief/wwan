@@ -5,23 +5,57 @@ use warnings;
 use Data::Dumper;
 
 use constant {
-    QMI_CTL => 0,
-    QMI_WDS => 1,
-    QMI_DMS => 2,
+    QMI_CTL => 0x00,
+    QMI_WDS => 0x01,
+    QMI_DMS => 0x02,
+    QMI_NAS => 0x03,
 };
 
-package QMI::WDS;
 
+package QMI;
+use strict;
+use warnings;
+{
+my %msg;
+}
+1; # eof QMI
+
+package QMI::WDS;
+use strict;
+use warnings;
+#use QMI;
+use vars qw(@ISA);
+@ISA = qw(QMI);
+{
 my %msg = (
     0x0001 => {
 	name => 'SET_EVENT_REPORT',
 	0x16 => {
 	    name => 'Channel Rate',
-	    decode => sub { sprintf "tx: %u, rx: %u", unpack("vv", pack("C*", shift));  },
+	    decode => sub { sprintf "tx: %u, rx: %u", unpack("VV", pack("C*", @{shift()}));  },
 	},
 	0x1d => {
 	    name => 'Current Data Bearer Technology',
 	    decode => \&tlv_data_bearer,
+	},
+    },
+    0x0022 => {
+	name => 'GET_PKT_SRVC_STATUS',
+	0x01 => {
+	    name => 'Packet Service Status',
+	    decode => \&tlv_connstatus,
+	},
+	0x10 => {
+	    name => 'Call End Reason',
+	    decode => sub {  sprintf "%u",  unpack("v", pack("C*", @{$_[0]})); },
+	},
+	0x11 => {
+	    name => 'Verbose Call End Reason',
+	    decode => \&tlv_callendreason,
+	},
+	0x12 => {
+	    name => 'IP Family',
+	    decode => sub { sprintf "IPv%u", $_[0]->[0] },
 	},
     },
     0x002d => {
@@ -48,6 +82,99 @@ my %msg = (
 	},
     },
     );
+
+my %call_end_type_map = (
+    1 => 'Mobile IP',
+    2 => 'Internal',
+    3 => 'Call Manager deﬁned',
+    6 => '3GPP speciﬁcation deﬁned',
+    7 => 'PPP',
+    8 => 'EHRPD',
+    9 => 'IPv6',
+    );
+
+my %call_end_reason_map = (
+    1 => { # Mobile IP
+    },
+    2 => { # Internal
+	201 => 'INTERNAL_ERROR',
+	202 => 'CALL_ENDED',
+	203 => 'INTERNAL_UNKNOWN_CAUSE_CODE',
+	204 => 'UNKNOWN_CAUSE_CODE',
+	205 => 'CLOSE_IN_PROGRESS',
+	206 => 'NW_INITIATED_TERMINATION',
+	207 => 'APP_PREEMPTED',
+    },
+    3 => { # Call Manager deﬁned
+    },
+    6 => { #  3GPP speciﬁcation deﬁned
+	8  => 'OPERATOR_DETERMINED_BARRING',
+	25 => 'LLC_SNDCP_FAILURE',
+	26 => 'INSUFFICIENT_RESOURCES',
+	27 => 'UNKNOWN_APN',
+	28 => 'UNKNOWN_PDP',
+	29 => 'AUTH_FAILED',
+	30  => 'GGSN_REJECT',
+	31  => 'ACTIVATION_REJECT',
+	32  => 'OPTION_NOT_SUPPORTED',
+	33  => 'OPTION_UNSUBSCRIBED',
+	34  => 'OPTION_TEMP_OOO',
+	35  => 'NSAPI_ALREADY_USED',
+	36  => 'REGULAR_DEACTIVATION',
+	37  => 'QOS_NOT_ACCEPTED',
+	38  => 'NETWORK_FAILURE',
+	39  => 'UMTS_REACTIVATION_REQ',
+	40  => 'FEATURE_NOT_SUPPORTED',
+	41  => 'TFT_SEMANTIC_ERROR',
+	42  => 'TFT_SYNTAX_ERROR',
+	43  => 'UNKNOWN_PDP_CONTEXT',
+	44  => 'FILTER_SEMANTIC_ERROR',
+	45  => 'FILTER_SYNTAX_ERROR',
+	46  => 'PDP_WITHOUT_ACTIVE_TFT',
+	81  => 'INVALID_TRANSACTION_ID',
+	95  => 'MESSAGE_INCORRECT_SEMANTIC',
+	96  => 'INVALID_MANDATORY_INFO',
+	97  => 'MESSAGE_TYPE_UNSUPPORTED',
+	98  => 'MSG_TYPE_NONCOMPATIBLE_STATE',
+	99  => 'UNKNOWN_INFO_ELEMENT',
+	100 => 'CONDITIONAL_IE_ERROR',
+	101 => 'MSG_AND_PROTOCOL_STATE_UNCOMPATIBLE',
+	111 => 'PROTOCOL_ERROR',
+	112 => 'APN_TYPE_CONFLICT',
+	50  => 'IP_V4_ONLY_ALLOWED',
+	51  => 'IP_V6_ONLY_ALLOWED',
+	52  => 'SINGLE_ADDR_BEARER_ONLY',
+	53  => 'ESM_INFO_NOT_RECEIVED',
+	54  => 'PDN_CONN_DOES_NOT_EXIST',
+	55  => 'MULTI_CONN_TO_SAME_PDN_NOT_ALLOWED',
+    },
+    7 => { #  PPP
+    },
+    8 => { #  EHRPD
+    },
+    9 => { #  IPv6
+    },
+    );
+
+sub tlv_callendreason {
+    my ($type, $reason) = unpack("v2", pack("C*",  @{$_[0]})); 
+    return "$call_end_type_map{$type}: " . ($call_end_reason_map{$type}{$reason} || 'unknown') . " [type=$type, reason=$reason]";
+}
+
+my %connection_status_map = (
+    1 => 'DISCONNECTED',
+    2 => 'CONNECTED',
+    3 => 'SUSPENDED',
+    4 => 'AUTHENTICATING',
+    );
+
+sub tlv_connstatus {
+    my $data = shift;
+    my $ret = $connection_status_map{$data->[0]};
+    $ret .= ", reconfiguration " . ($data->[1] ? "" : "not ") . "required" if exists($data->[1]);
+    return $ret;
+}
+   
 
 sub tlv_ipv4addr {
     my $data = shift;
@@ -91,8 +218,254 @@ sub tlv {
     return ''; # => default handling
 }
 
-
+}
 1; # eof QMI::WDS;
+
+
+package QMI::NAS;
+use strict;
+use warnings;
+#use QMI;
+use vars qw(@ISA);
+@ISA = qw(QMI);
+{
+my %msg = (
+    0x0024 => {
+	name => 'GET_SERVING_SYSTEM',
+	0x01 => {
+	    name => 'Serving System',
+	    decode => \&tlv_serving_system,
+	},
+	0x10 => {
+	    name => 'Roaming Indicator',
+	    decode => sub { 'roaming: ' . ($_[0]->[0] ? 'off' : 'on') .  ($_[0]->[0] > 1 ? " operator specific: $_[0]->[0]" : '') },
+	},
+	0x11 => {
+	    name => 'Data Service Capability',
+	    decode => \&tlv_data_service_cap,
+	},
+	0x12 => {
+	    name => 'Current PLMN',
+	    decode => \&tlv_plmn,
+	},
+	0x15 => {
+	    name => 'Roaming Indicator List',
+	    decode => \&tlv_roaming_list,
+	},
+	0x1c => {
+	    name => '3GPP Location Area Code',
+	    decode => sub {  sprintf "lac=0x%04x", unpack("v", pack("C*", @{$_[0]})); },
+	},
+	0x1d => {
+	    name => '3GPP Cell ID',
+	    decode => sub { sprintf "cell_id=0x%08x", unpack("v", pack("C*", @{$_[0]})); },
+	},
+	0x21 => {
+	    name => 'Detailed Service Information',
+	    decode => \&tlv_detailed_service,
+	},
+	0x24 => {
+	    name => 'TAC Information for LTE',
+	    decode => sub {  sprintf "tac=0x%04x", unpack("v", pack("C*", @{$_[0]})); },
+	},
+    },
+    0x0025 => {
+	name => 'GET_HOME_NETWORK',
+	0x01 => {
+	    name => 'Home Network',
+	    decode => \&tlv_plmn,
+	},
+    },
+    0x0034 => {
+	name => 'GET_SYSTEM_SELECTION_PREFERENCE',
+	0x10 => {
+	    name => 'Emergency Mode',
+	    decode => sub { 'Emergency mode: ' . ($_[0]->[0] ? 'on' : 'off') },
+	},
+	0x11 => {
+	    name => 'Mode Preference',
+	    decode => \&tlv_mode_pref,
+	},
+	0x14 => {
+	    name => 'Roaming Preference',
+	    decode => \&tlv_roaming_pref,
+	},
+	0x16 => {
+	    name => 'Network Selection Preference',
+	    decode => sub { 'Network Selection: ' .  ($_[0]->[0] ? 'manual' : 'automatic') },
+	},
+	0x18 => {
+	    name => 'Service Domain Preference',
+	    decode => \&tlv_service_pref,
+	},
+	0x19 => {
+	    name => 'GSM/WCDMA Acquisition Order Preference',
+	    decode => \&tlv_aquis_pref,
+	},
+
+    },
+    );
+
+my %registration_map = (
+    0 => 'NOT REGISTERED',
+    1 => 'REGISTERED',
+    2 => 'SEARCHING',
+    3 => 'DENIED',
+    4 => 'UNKNOWN',
+    );
+
+my %attach_map = (
+    0 => 'UNKNOWN',
+    1 => 'ATTACHED',
+    2 => 'DETACHED',
+    );
+my %network_map = (
+    0 => 'UNKNOWN',
+    1 => '3GPP2',
+    2 => '3GPP',
+    );
+my %radio_if_map = (
+    0x00 => 'NO_SVC',
+    0x01 => 'CDMA_1X',
+    0x02 => 'CDMA_1XEVDO',
+    0x03 => 'AMPS',
+    0x04 => 'GSM',
+    0x05 => 'UMTS',
+    0x08 => 'LTE',
+    );
+
+sub tlv_serving_system {
+    my $data = shift;
+    my ($registration, $cs_attach, $ps_attach, $selected_network, $num_radio, @radio) = @$data;
+
+    return "$registration_map{$registration}, CS_$attach_map{$cs_attach}, PS_$attach_map{$ps_attach}, $network_map{$selected_network}, " . 
+	join('|', map { $radio_if_map{$_} } @radio);
+}
+
+my %data_cap_map = (
+0x01 => 'GPRS',
+0x02 => 'EDGE',
+0x03 => 'HSDPA',
+0x04 => 'HSUPA',
+0x05 => 'WCDMA',
+0x06 => 'CDMA',
+0x07 => 'EV-DO REV 0',
+0x08 => 'EV-DO REV A',
+0x09 => 'GSM',
+0x0A => 'EV-DO REV B',
+0x0B => 'LTE',
+0x0C => 'HSDPA+',
+0x0D => 'DC-HSDPA+',
+    );
+sub tlv_data_service_cap {
+    my @data = @{shift()};
+    my $len = shift(@data);
+    return "[$len] " . join('|', map { $data_cap_map{$_} } @data);
+}
+
+
+sub tlv_plmn {
+    my $datastr = pack("C*", @{shift()});
+    my ($mcc, $mnc, $len) = unpack("vvC", $datastr);
+    return sprintf "%u%02u - %s", $mcc, $mnc, substr($datastr, 5, $len);
+}
+
+sub tlv_roaming_list {
+    my @data = @{shift()};
+    my $n = shift(@data);
+    my %roam = @data;
+    return join(', ', map { "if=$radio_if_map{$_} roam=". $roam{$_} ? 'off' : 'on' } keys %roam);
+}
+
+my %srv_status_map = (
+    0x00 => 'No service',
+    0x01 => 'Limited service',
+    0x02 => 'Service available',
+    0x03 => 'Limited regional service',
+    0x04 => 'MS in power save or deep sleep',
+    );
+my %srv_cap_map = (
+    0x00 => 'No service',
+    0x01 => 'Circuit-switched only',
+    0x02 => 'Packet-switched only',
+    0x03 => 'Circuit-switched and-packet switched',
+    0x04 => 'MS found the right system but not yet registered/attached',
+    );
+my %srv_hdr_status_map = (
+    0x00 => 'No service',
+    0x01 => 'Limited service',
+    0x02 => 'Service available',
+    0x03 => 'Limited regional service',
+    0x04 => 'MS in power save or deep sleep',
+);
+
+sub tlv_detailed_service {
+    my ($status, $capability, $hdr_status, $hdr_hybrid, $forbidden) =  @{shift()};
+    return "$srv_status_map{$status}, $srv_cap_map{$capability}, HDR: $srv_hdr_status_map{$hdr_status}, " .
+	($hdr_hybrid ? 'H' : 'Not h') . "ybrid, " . ($forbidden ? 'F' : 'Not f') . "orbidden";
+}
+
+my %roam_map = (
+    0x01 => 'OFF',
+    0x02 => 'NOT OFF',
+    0x03 => 'NOT FLASHING',
+    0xff => 'ANY',
+    );
+
+sub tlv_roaming_pref {
+    my $roam = unpack("v", pack("C*", @{shift()}));
+    return 'Roaming preference: ' . $roam_map{$roam};
+}
+
+my %mode_map = (
+    1<<0 => 'cdma2000 1X',
+    1<<1 => 'cdma2000 HRPD (1xEV-DO)',
+    1<<2 => 'GSM',
+    1<<3 => 'UMTS',
+    1<<4 => 'LTE',
+);
+
+sub tlv_mode_pref {
+    my $mode = unpack("v", pack("C*", @{shift()}));
+    return join('|', map { $mode_map{$_} } grep { $mode & $_ } keys %mode_map);
+}
+
+my %service_domain_map = (
+    0x00 => 'Circuit-switched only',
+    0x01 => 'Packet-switched only',
+    0x02 => 'Circuit-switched and packet-switched',
+    0x03 => 'Packet-switched attach',
+    0x04 => 'Packet-switched detach',
+    );
+
+sub tlv_service_pref {
+    my $pref = unpack("V", pack("C*", @{shift()}));
+    return $service_domain_map{$pref};
+}
+
+my %aquis_order_map = (
+    0x00 => 'Automatic',
+    0x01 => 'GSM then WCDMA',
+    0x02 => 'WCDMA then GSM',
+    );
+
+sub tlv_aquis_pref {
+    my $pref = unpack("V", pack("C*", @{shift()}));
+    return $aquis_order_map{$pref};
+}
+
+sub tlv {
+    my ($msgid, $tlv, $data) = @_;
+    
+    if (exists($msg{$msgid}) && exists($msg{$msgid}->{$tlv})) {
+	return &{$msg{$msgid}->{$tlv}{decode}}($data);
+    }
+    return ''; # => default handling
+}
+
+}
+1; # eof QMI::NAS;
+
 
 package main;
 
@@ -243,6 +616,7 @@ my %sysname = (
     0 => "QMI_CTL",
     1 => "QMI_WDS",
     2 => "QMI_DMS",
+    3 => "QMI_NAS",
     );
     
 
@@ -362,6 +736,8 @@ sub pretty_print_qmi {
 	    $txt = ($v->[0] ? "FAILURE" : "SUCCESS") . " - " . $err{unpack("v", pack("C*", @$v[2..3]))};
 	} elsif ($qmi->{sys} == QMI_WDS) {
 	    $txt = QMI::WDS::tlv($qmi->{msgid}, $k, $v);
+	} elsif ($qmi->{sys} == QMI_NAS) {
+	    $txt = QMI::NAS::tlv($qmi->{msgid}, $k, $v);
 	}
 	$txt ||= mk_ascii($v);
 
@@ -394,9 +770,10 @@ sub read_match {
 	do {
 	    my $len = 0;
 	    if (!$raw) {
-		$len = sysread(F, $raw, 256);
+		$len = sysread(F, $raw, 512);
 		warn("read $len bytes from $dev\n") if ($debug && $len);
 	    } else {
+		$len = length($raw);
 		warn "$netdev: last read return multiple packets\n" if $verbose;
 	    }
 
@@ -546,6 +923,13 @@ sub mk_dms {
     return mk_qmi(QMI_DMS, $cid, @_);
 }
 
+# QMI Network Access Service (QMI_NAS)
+sub mk_nas {
+    my $cid = get_cid(QMI_NAS);
+    return undef if (!$cid);
+    return mk_qmi(QMI_NAS, $cid, @_);
+}
+
 my %srvc_status = (
     1 => "DISCONNECTED",
     2 => "CONNECTED",
@@ -575,80 +959,13 @@ sub wds_stop_network_interface {
     return $err{&verify_status($ret)};
 }
 
-
-my %call_end_reason = (
-    1 => { # Mobile IP
-    },
-    2 => { # Internal
-	201 => 'INTERNAL_ERROR',
-	202 => 'CALL_ENDED',
-	203 => 'INTERNAL_UNKNOWN_CAUSE_CODE',
-	204 => 'UNKNOWN_CAUSE_CODE',
-	205 => 'CLOSE_IN_PROGRESS',
-	206 => 'NW_INITIATED_TERMINATION',
-	207 => 'APP_PREEMPTED',
-    },
-    3 => { # Call Manager deﬁned
-    },
-    6 => { #  3GPP speciﬁcation deﬁned
-	8  => 'OPERATOR_DETERMINED_BARRING',
-	25 => 'LLC_SNDCP_FAILURE',
-	26 => 'INSUFFICIENT_RESOURCES',
-	27 => 'UNKNOWN_APN',
-	28 => 'UNKNOWN_PDP',
-	29 => 'AUTH_FAILED',
-	30  => 'GGSN_REJECT',
-	31  => 'ACTIVATION_REJECT',
-	32  => 'OPTION_NOT_SUPPORTED',
-	33  => 'OPTION_UNSUBSCRIBED',
-	34  => 'OPTION_TEMP_OOO',
-	35  => 'NSAPI_ALREADY_USED',
-	36  => 'REGULAR_DEACTIVATION',
-	37  => 'QOS_NOT_ACCEPTED',
-	38  => 'NETWORK_FAILURE',
-	39  => 'UMTS_REACTIVATION_REQ',
-	40  => 'FEATURE_NOT_SUPPORTED',
-	41  => 'TFT_SEMANTIC_ERROR',
-	42  => 'TFT_SYNTAX_ERROR',
-	43  => 'UNKNOWN_PDP_CONTEXT',
-	44  => 'FILTER_SEMANTIC_ERROR',
-	45  => 'FILTER_SYNTAX_ERROR',
-	46  => 'PDP_WITHOUT_ACTIVE_TFT',
-	81  => 'INVALID_TRANSACTION_ID',
-	95  => 'MESSAGE_INCORRECT_SEMANTIC',
-	96  => 'INVALID_MANDATORY_INFO',
-	97  => 'MESSAGE_TYPE_UNSUPPORTED',
-	98  => 'MSG_TYPE_NONCOMPATIBLE_STATE',
-	99  => 'UNKNOWN_INFO_ELEMENT',
-	100 => 'CONDITIONAL_IE_ERROR',
-	101 => 'MSG_AND_PROTOCOL_STATE_UNCOMPATIBLE',
-	111 => 'PROTOCOL_ERROR',
-	112 => 'APN_TYPE_CONFLICT',
-	50  => 'IP_V4_ONLY_ALLOWED',
-	51  => 'IP_V6_ONLY_ALLOWED',
-	52  => 'SINGLE_ADDR_BEARER_ONLY',
-	53  => 'ESM_INFO_NOT_RECEIVED',
-	54  => 'PDN_CONN_DOES_NOT_EXIST',
-	55  => 'MULTI_CONN_TO_SAME_PDN_NOT_ALLOWED',
-    },
-    7 => { #  PPP
-    },
-    8 => { #  EHRPD
-    },
-    9 => { #  IPv6
-    },
-    );
-
 sub call_end_reason {
     my $qmi = shift;
     my $v = $qmi->{tlvs}{0x11}; # Verbose Call End Reason
     return 'unknown' unless $v;
 
-    my ($type, $reason) = unpack("v2", pack("C*", @$v)); 
-    return ($call_end_reason{$type}{$reason} || 'unknown') . " [type=$type, reason=$reason]";
+    return &tlv_callendreason($v);
 } 
-    
-
 
 sub wds_start_network_interface {
     my %tlv;
@@ -955,6 +1272,44 @@ sub status {
     map { warn "$netdev: $_: $call->{$_}\n" } keys %$call;
 }
 
+
+## NAS
+# This is deprecated - use QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE instead
+sub nas_initiate_network_register  {
+    my $req = &mk_nas(0x0022, # QMI_NAS_INITIATE_NETWORK_REGISTER
+		      { 0x01 => pack("C*", 1), # 1 => auto, 2 => manual?
+#			0x10 => pack("vvC", 242, 1, 8), # telenor LTE
+			});
+    $debug = 1;
+    my $ret = &send_and_recv($req);
+    $debug = 0;
+    return &verify_status($ret);
+}
+
+
+sub nas_set_system_selection_preference  {
+    my $req = &mk_nas(0x0033, # QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE
+		      { 0x11 => pack("v", 1<<4 # LTE
+				        | 1<<3 # UMTS
+				        | 1<<2 # GSM
+			    ),
+		      });
+    $debug = 1;
+    my $ret = &send_and_recv($req);
+    $debug = 0;
+    return &verify_status($ret);
+}
+
+sub nas_perform_network_scan  {
+    my $req = &mk_nas(0x0021); # QMI_NAS_PERFORM_NETWORK_SCAN
+    $debug = 1;
+    my $ret = &send_and_recv($req, 180);
+    $debug = 0;
+    return &verify_status($ret);
+}
+
+
+
 ### main ###
 
 # look up management character device
@@ -1028,6 +1383,21 @@ if ($cmd eq 'start') {
     }
     &send_and_recv(&mk_wds($msgid));
     $debug = 0;
+} elsif ($cmd eq 'nas') {
+    $debug = 1;
+    if ($ARGV[2]) {
+	my $msgid = $ARGV[2];
+	if ($msgid =~ s/^0x//) {
+	    $msgid = hex($msgid);
+	} else {
+	    &usage;
+	}
+	&send_and_recv(&mk_nas($msgid));
+	$debug = 0;
+    } else {
+	&nas_set_system_selection_preference; # force LTE
+	#&nas_perform_network_scan;
+    }
 } else {
     &usage;
 }
