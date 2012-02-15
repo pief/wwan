@@ -45,6 +45,11 @@ if ($ENV{'PHASE'} eq 'pre-up') {
     exit 0;
 }
 
+# get the address family
+my $family = $ENV{'ADDRFAM'};
+$family =~ s/^inet//;
+$family ||= 4;
+
 # need to keep some external state
 my $state = "/etc/network/run/qmistate.$netdev";
 
@@ -311,6 +316,8 @@ sub wds_start_network_interface {
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
     $tlv{0x18} = $pw if $pw;
+    $tlv{0x19} = pack("C", $family) if $family;
+
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
     warn "$netdev: connecting...\n" if $verbose;
