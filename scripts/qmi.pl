@@ -9,6 +9,7 @@ use constant {
     QMI_WDS => 0x01,
     QMI_DMS => 0x02,
     QMI_NAS => 0x03,
+    QMI_WMS => 0x05,
 };
 
 
@@ -617,6 +618,7 @@ my %sysname = (
     1 => "QMI_WDS",
     2 => "QMI_DMS",
     3 => "QMI_NAS",
+    5 => "QMI_WMS",
     );
     
 
@@ -912,22 +914,29 @@ sub release_cids {
 }
 
 sub mk_wds {
-    my $cid = get_cid(QMI_WDS);
+    my $cid = &get_cid(QMI_WDS);
     return undef if (!$cid);
-    return mk_qmi(QMI_WDS, $cid, @_);
+    return &mk_qmi(QMI_WDS, $cid, @_);
 }
 
 sub mk_dms {
-    my $cid = get_cid(QMI_DMS);
+    my $cid = &get_cid(QMI_DMS);
     return undef if (!$cid);
-    return mk_qmi(QMI_DMS, $cid, @_);
+    return &mk_qmi(QMI_DMS, $cid, @_);
 }
 
 # QMI Network Access Service (QMI_NAS)
 sub mk_nas {
-    my $cid = get_cid(QMI_NAS);
+    my $cid = &get_cid(QMI_NAS);
     return undef if (!$cid);
-    return mk_qmi(QMI_NAS, $cid, @_);
+    return &mk_qmi(QMI_NAS, $cid, @_);
+}
+
+# QMI Wireless Message Service (QMI_WMS)
+sub mk_wms {
+    my $cid = &get_cid(QMI_WMS);
+    return undef if (!$cid);
+    return &mk_qmi(QMI_WMS, $cid, @_);
 }
 
 my %srvc_status = (
@@ -964,14 +973,16 @@ sub call_end_reason {
     my $v = $qmi->{tlvs}{0x11}; # Verbose Call End Reason
     return 'unknown' unless $v;
 
-    return &tlv_callendreason($v);
+    return &QMI::WDS::tlv_callendreason($v);
 } 
 
 sub wds_start_network_interface {
+    my $family = shift;
     my %tlv;
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
     $tlv{0x18} = $pw if $pw;
+    $tlv{0x19} = pack("C", $family) if $family;
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
     warn "$netdev: connecting...\n" if $verbose;
@@ -991,6 +1002,13 @@ sub wds_start_network_interface {
     return $status;
 }
 
+sub wds_set_client_ip_family_pref {
+    my $family = shift;
+    my $req = &mk_wds(0x004d, # QMI_WDS_SET_CLIENT_IP_FAMILY_PREF
+		      { 0x01 =>  pack("C", $family) });
+    my $ret = &send_and_recv($req);
+    return &verify_status($ret);
+}
 
 ### 2. verify and optionally enter PIN code ###
 
@@ -1308,7 +1326,45 @@ sub nas_perform_network_scan  {
     return &verify_status($ret);
 }
 
+## WMS
 
+sub wms_raw_read  {
+    my ($storage, $index) = @_;
+    my $req = &mk_wms(0x0022,  # QMI_WMS_RAW_READ
+		      { 0x01 => pack("CV", $storage, $index),
+			0x10 => pack("C", 1),
+		      });
+    $debug = 1;
+    my $ret = &send_and_recv($req);
+    $debug = 0;
+    return &verify_status($ret);
+}
+
+sub wms_list_messages  {
+    my $req = &mk_wms(0x0031,  # QMI_WMS_LIST_MESSAGES
+		      { 0x01 => pack("C", 0),
+#			0x10 => pack("C", 1),
+			0x11 => pack("C", 1),
+		      });
+    $debug = 1;
+    my $ret = &send_and_recv($req);
+    $debug = 0;
+    return &verify_status($ret);
+}
+
+sub ctl_set_data_format {
+    my $mode = shift;
+    my $qos = (shift) ? 1 : 0;
+    my $req = &mk_qmi(0, 0, 0x0026, {
+	0x01 => pack("C", $qos), # (0 = no QoS Header, 1 = include QoS header)
+	0x10 => pack("CC", $mode, #(1 = 802.3, 2 = raw IP mode)
+		     0) # ???
+		      });
+    $debug = 1;
+    my $ret = &send_and_recv($req);
+    $debug = 0;
+    return &verify_status($ret);
+}
 
 ### main ###
 
@@ -1351,7 +1407,14 @@ $cmd =~ s/^post-down$/stop/;
 if ($cmd eq 'start') {
     if (&dms_verify_pin) {
 	# FIXME: must wait for network registration before continuing
-	&wds_start_network_interface;
+	if ($ARGV[2] && ($ARGV[2] == 4 || $ARGV[2] == 6)) {
+	    $debug = 1;
+#	    &wds_set_client_ip_family_pref($ARGV[2]);
+	    &wds_start_network_interface($ARGV[2]);
+	    $debug = 0;
+	} else {
+	    &wds_start_network_interface;
+	}
     } else {
 	warn "$netdev: cannot start without PIN verification\n";
     }
@@ -1383,6 +1446,20 @@ if ($cmd eq 'start') {
     }
     &send_and_recv(&mk_wds($msgid));
     $debug = 0;
+} elsif ($cmd eq 'dms') {
+    $debug = 1;
+    if ($ARGV[2]) {
+	my $msgid = $ARGV[2];
+	if ($msgid =~ s/^0x//) {
+	    $msgid = hex($msgid);
+	} else {
+	    &usage;
+	}
+	&send_and_recv(&mk_dms($msgid));
+	$debug = 0;
+    } else {
+	&usage;
+    }
 } elsif ($cmd eq 'nas') {
     $debug = 1;
     if ($ARGV[2]) {
@@ -1397,6 +1474,26 @@ if ($cmd eq 'start') {
     } else {
 	&nas_set_system_selection_preference; # force LTE
 	#&nas_perform_network_scan;
+    }
+} elsif ($cmd eq 'wms') {
+    $debug = 1;
+    if ($ARGV[2]) {
+	my $msgid = $ARGV[2];
+	if ($msgid =~ s/^0x//) {
+	    $msgid = hex($msgid);
+	} else {
+	    &usage;
+	}
+	&send_and_recv(&mk_wms($msgid));
+	$debug = 0;
+    } else {
+	&wms_list_messages;
+	&wms_raw_read(0,0);
+    }
+} elsif ($cmd eq 'mode') {
+    my $mode = $ARGV[2];
+    if ($mode == 1 || $mode == 2) {
+	&ctl_set_data_format($mode, $ARGV[3]);
     }
 } else {
     &usage;
