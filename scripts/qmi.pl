@@ -24,7 +24,7 @@ my %msg;
 package QMI::WDS;
 use strict;
 use warnings;
-#use QMI;
+use Net::IP;
 use vars qw(@ISA);
 @ISA = qw(QMI);
 {
@@ -59,8 +59,50 @@ my %msg = (
 	    decode => sub { sprintf "IPv%u", $_[0]->[0] },
 	},
     },
+    0x002b => {
+	name => 'GET_PROFILE_SETTINGS',
+	0x11 => {
+	    name => 'PDP Type',
+	    decode => \&tlv_pdptype,
+	},
+	0x15 => {
+	    name => 'Primary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x16 => {
+	    name => 'Secondary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x1e => {
+	    name => 'Preferred IPv4 address',
+	    decode => \&tlv_ipv4addr,
+	},
+    },
+    0x002c => {
+	name => 'GET_DEFAULT_SETTINGS',
+	0x11 => {
+	    name => 'PDP Type',
+	    decode => \&tlv_pdptype,
+	},
+	0x15 => {
+	    name => 'Primary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x16 => {
+	    name => 'Secondary DNS Address',
+	    decode => \&tlv_ipv4addr,
+	},
+	0x1e => {
+	    name => 'Preferred IPv4 address',
+	    decode => \&tlv_ipv4addr,
+	},
+    },
     0x002d => {
 	name => 'GET_RUNTIME_SETTINGS',
+	0x11 => {
+	    name => 'PDP Type',
+	    decode => \&tlv_pdptype,
+	},
 	0x15 => {
 	    name => 'Primary DNS Address',
 	    decode => \&tlv_ipv4addr,
@@ -80,6 +122,22 @@ my %msg = (
 	0x21 => {
 	    name => 'Subnet mask',
 	    decode => \&tlv_ipv4addr,
+	},
+	0x25 => {
+	    name => 'IPv6 Address',
+	    decode => \&tlv_ipv6addr,
+	},
+	0x26 => {
+	    name => 'IPv6 Gateway Address',
+	    decode => \&tlv_ipv6addr,
+	},
+	0x27 => {
+	    name => 'Primary IPv6 DNS Address',
+	    decode => \&tlv_ipv6addr,
+	},
+	0x28 => {
+	    name => 'Secondary IPv6 DNS Address',
+	    decode => \&tlv_ipv6addr,
 	},
     },
     );
@@ -176,10 +234,27 @@ sub tlv_connstatus {
     return $ret;
 }
    
+my %pdp_type_map = (
+    0 => 'PDP-IP (IPv4)',
+    1 => 'PDP-PPP',
+    2 => 'PDP-IPV6',
+    3 => 'PDP-IPV4V6',
+    );
+sub tlv_pdptype {
+   my $data = shift;
+   return $pdp_type_map{$data->[0]};
+}
 
 sub tlv_ipv4addr {
     my $data = shift;
     return join('.', reverse(@$data));
+}
+
+sub tlv_ipv6addr {
+    my $data = shift;
+    my $addr = join(':', map { sprintf("%04x", $_) } unpack("n*", pack("C*", @{$data}[0..15])));
+    $addr .= "/$data->[16]" if exists($data->[16]);
+    return Net::IP::ip_compress_address($addr, 6);
 }
 
 my %current_nw_map = (
@@ -504,7 +579,7 @@ my $verbose = 1;
 my $debug = 0;
 
 # internal state
-my $dev;		# management device
+my $dev = $ENV{MGMT} || '';		# management device
 my @cid;		# array of allocated CIDs
 my $tid = 1;		# transaction id
 my $wds_handle;		# connection handle
@@ -743,7 +818,7 @@ sub pretty_print_qmi {
 	}
 	$txt ||= mk_ascii($v);
 
-	printf "${pfx}[0x%02x] (%2d) " . "%02x " x $tlvlen . "\t$txt\n", $k, $tlvlen, @$v;
+	printf "${pfx}[0x%02x] (%2d) " . "%02x " x $tlvlen . "\t%s\n", $k, $tlvlen, @$v, $txt;
     }
 }
 
@@ -1369,7 +1444,7 @@ sub ctl_set_data_format {
 ### main ###
 
 # look up management character device
-$dev = &get_mgmt_dev($netdev);
+$dev ||= &get_mgmt_dev($netdev);
 if (!$dev) {
     warn "$netdev: Cannot find a QMI management interface!\n" if $debug;
     exit;
@@ -1444,7 +1519,15 @@ if ($cmd eq 'start') {
     } else {
 	&usage;
     }
-    &send_and_recv(&mk_wds($msgid));
+    if ($ARGV[3]) {
+	my $tlv = $ARGV[3];
+	$tlv =~ s/^0x//;
+	$tlv = hex($tlv);
+	my $data = pack("C*", map { hex } @ARGV[4..$#ARGV]);
+	&send_and_recv(&mk_wds($msgid, { $tlv => $data }));
+    } else {
+	&send_and_recv(&mk_wds($msgid));
+    }
     $debug = 0;
 } elsif ($cmd eq 'dms') {
     $debug = 1;
