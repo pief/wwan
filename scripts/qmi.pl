@@ -1313,6 +1313,7 @@ sub wds_reset {
 
 
 sub save_wds_state {
+    printf STDERR "$netdev: saving state to \"$state\"\n" if $verbose;
     if (open(X, ">$state")) {
 	if ($wds_handle) {
 	    printf X "%u %u\n", $cid[QMI_WDS], $wds_handle;
@@ -1325,6 +1326,7 @@ sub save_wds_state {
 }
 
 sub get_wds_state {
+    printf STDERR "$netdev: reading state from \"$state\"\n" if $verbose;
     if ($cid[QMI_WDS]) {
 	warn "cannot update state after QMI_WDS commands\n";
 	return;
@@ -1447,9 +1449,7 @@ sub nas_set_system_selection_preference  {
 				        | 1<<2 # GSM
 			    ),
 		      });
-    $debug = 1;
     my $ret = &send_and_recv($req);
-    $debug = 0;
     return &verify_status($ret);
 }
 
@@ -1556,8 +1556,7 @@ if ($system == QMI_WDS) {
     # stop interface?
     } elsif ($cmd eq 'stop') {
 	&wds_stop_network_interface;
-    }
-
+ 
     # or just print status?
     } elsif ($cmd eq 'status') {
 	&status;
@@ -1571,7 +1570,7 @@ if ($system == QMI_WDS) {
 			       }));
 	&monitor;
 	$debug = 0;
-
+    }
 } elsif ($system == QMI_NAS) {
     &nas_set_system_selection_preference unless $cmd; # force new scan
 } elsif ($system == QMI_WMS) {
@@ -1587,7 +1586,7 @@ if ($system == QMI_WDS) {
 }
 
 # default common command number handling
-if ($cmd =~ s/^0x//) {
+if ($cmd && $cmd =~ s/^0x//) {
     my $msgid = hex($cmd);
     my $cid = &get_cid($system);
 
