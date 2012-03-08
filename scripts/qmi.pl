@@ -544,11 +544,41 @@ sub tlv {
 
 
 package main;
+use strict;
+use warnings;
+use Getopt::Long;
+
+my %sysname = (
+    0 => "QMI_CTL",
+    1 => "QMI_WDS",
+    2 => "QMI_DMS",
+    3 => "QMI_NAS",
+    5 => "QMI_WMS",
+    );
 
 ### functions used during enviroment variable parsing ###
 sub usage {
-    warn "Usage: $0 start|stop|status|reset|monitor [iface]\n";
-    warn "Test usage: $0 test iface msgid\n";
+    print STDERR <<EOH
+Usage: $0 [options] --device=<iface> command tlv
+
+Where [options] are
+
+  --family=<4|6>
+  --pin=<code>
+  --apn=<apn>
+  --user=<user>
+  --pw=<pw>
+  --[no]verbose
+  --[no]debug
+  --system=<sysname|number>
+
+Command is either a hex command number or an alias
+
+TLV depend on command and is on the format
+  0x00 d a t a
+
+EOH
+    ;
     &release_cids;
     exit;
 }
@@ -561,12 +591,9 @@ sub strip_quotes {
 
 ### global variables ###
 
-# interface
-my $netdev = $ENV{'IFACE'};		# netdevice
-$netdev = $ARGV[1] if ($ARGV[1]);	# let command line override interface (e.g for status command)
-&usage unless $netdev;
-my $state = "/etc/network/run/qmistate.$netdev"; # state keeping file
-
+## set defaults based on environment
+my $netdev = $ENV{'IFACE'};   	   # netdevice
+my $family = $ENV{'ADDRFAM'} || 4; # default to IPv4
 
 # per interface config
 my %pin; $pin{1} = &strip_quotes($ENV{'IF_WWAN_PIN'}) if $ENV{'IF_WWAN_PIN'};
@@ -577,6 +604,47 @@ my $pw = &strip_quotes($ENV{'IF_WWAN_PW'});
 # output levels
 my $verbose = 1;
 my $debug = 0;
+
+# defaulting to QMI_WDS operations
+my $system = QMI_WDS;
+
+## let command line override defaults
+GetOptions(
+    'device=s' => \$netdev,
+    'family=s' => \$family,
+    'pin=s' => \$pin{1},
+    'apn=s' => \$apn,
+    'user=s' => \$user,
+    'pw=s' => \$pw,
+    'verbose!' => \$verbose,
+    'debug!' => \$debug,
+    'system=s' => \$system,
+    ) || &usage;
+
+# the rest of the command line is left for the actual command to run
+
+# network device is required
+&usage unless $netdev;
+
+# postprocess family
+$family =~ s/^inet//;
+$family =~ s/^ipv//i;
+
+# postprocess system
+if ($system =~ s/^0x//) {
+    $system = hex($system);
+}
+if ($system !~ /^\d+$/) {
+    $system = uc($system);
+    $system = "QMI_$system" unless ($system =~ /^QMI_/);
+    ($system) = grep { $sysname{$_} eq $system } keys %sysname;
+}
+
+# state keeping file
+my $state = "/etc/network/run/qmistate.$netdev";
+if ($family != 4) {
+    $state .= ".ipv$family";
+}
 
 # internal state
 my $dev = $ENV{MGMT} || '';		# management device
@@ -688,13 +756,6 @@ my %err = (
     0x0070 => "QMI_ERR_PB_HIDDEN_KEY_RESTRICTION",
     );
 
-my %sysname = (
-    0 => "QMI_CTL",
-    1 => "QMI_WDS",
-    2 => "QMI_DMS",
-    3 => "QMI_NAS",
-    5 => "QMI_WMS",
-    );
     
 
 ### 1. find the associated QMI interface  ###
@@ -1052,7 +1113,6 @@ sub call_end_reason {
 } 
 
 sub wds_start_network_interface {
-    my $family = shift;
     my %tlv;
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
@@ -1454,7 +1514,6 @@ if (!$dev) {
 open(F, "+<", $dev) || die "open $dev: $!\n";
 autoflush F 1;
 
-
 if (&is_at) {
     die "$netdev: no support for AT command $dev yet\n";
 }
@@ -1473,113 +1532,79 @@ $SIG{INT} = \&release_cids;
 # get and verify cached data, so we can reuse the QMI_WDS CID at least
 &get_wds_state;
 
-my $cmd = $ENV{'PHASE'};
-$cmd ||= $ARGV[0];
-$cmd =~ s/^pre-up$/start/;
-$cmd =~ s/^post-down$/stop/;
+# get the command
+my $cmd = shift;
 
-# start interface?
-if ($cmd eq 'start') {
-    if (&dms_verify_pin) {
-	# FIXME: must wait for network registration before continuing
-	if ($ARGV[2] && ($ARGV[2] == 4 || $ARGV[2] == 6)) {
-	    $debug = 1;
-#	    &wds_set_client_ip_family_pref($ARGV[2]);
-	    &wds_start_network_interface($ARGV[2]);
-	    $debug = 0;
-	} else {
+# let network scripts override everything
+if (exists $ENV{'PHASE'}) {
+    $cmd = $ENV{'PHASE'};
+    $cmd =~ s/^pre-up$/start/;
+    $cmd =~ s/^post-down$/stop/;
+    $system = QMI_WDS;
+}
+
+# special command alias handling per system
+if ($system == QMI_WDS) {
+    # start interface?
+    if ($cmd eq 'start') {
+	if (&dms_verify_pin) {
 	    &wds_start_network_interface;
+	} else {
+	    warn "$netdev: cannot start without PIN verification\n";
 	}
-    } else {
-	warn "$netdev: cannot start without PIN verification\n";
+
+    # stop interface?
+    } elsif ($cmd eq 'stop') {
+	&wds_stop_network_interface;
     }
 
-# stop interface?
-} elsif ($cmd eq 'stop') {
-    &wds_stop_network_interface;
+    # or just print status?
+    } elsif ($cmd eq 'status') {
+	&status;
+    } elsif ($cmd eq 'reset') {
+	warn "Resetting device state: ", $err{&ctl_sync}, "\n";
+    } elsif ($cmd eq 'monitor') {
+	$debug = 1;
+	&send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
+					0x15 => pack("C", 1), # Current Data Bearer Technology Indicator
+					0x17 => pack("C", 1), # Data Call Status Change Indicator
+			       }));
+	&monitor;
+	$debug = 0;
 
-# or just print status?
-} elsif ($cmd eq 'status') {
-    &status;
-} elsif ($cmd eq 'reset') {
-    warn "Resetting device state: ", $err{&ctl_sync}, "\n";
-} elsif ($cmd eq 'monitor') {
-    $debug = 1;
-    &send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
-				    0x15 => pack("C", 1), # Current Data Bearer Technology Indicator
-				    0x17 => pack("C", 1), # Data Call Status Change Indicator
-			   }));
-    &monitor;
-    $debug = 0;
-} elsif ($cmd eq 'test' && $ARGV[2]) {
-    $debug = 1;
-    my $msgid = $ARGV[2];
-    if ($msgid =~ s/^0x//) {
-	$msgid = hex($msgid);
-    } else {
-	&usage;
-    }
-    if ($ARGV[3]) {
-	my $tlv = $ARGV[3];
-	$tlv =~ s/^0x//;
-	$tlv = hex($tlv);
-	my $data = pack("C*", map { hex } @ARGV[4..$#ARGV]);
-	&send_and_recv(&mk_wds($msgid, { $tlv => $data }));
-    } else {
-	&send_and_recv(&mk_wds($msgid));
-    }
-    $debug = 0;
-} elsif ($cmd eq 'dms') {
-    $debug = 1;
-    if ($ARGV[2]) {
-	my $msgid = $ARGV[2];
-	if ($msgid =~ s/^0x//) {
-	    $msgid = hex($msgid);
-	} else {
-	    &usage;
-	}
-	&send_and_recv(&mk_dms($msgid));
-	$debug = 0;
-    } else {
-	&usage;
-    }
-} elsif ($cmd eq 'nas') {
-    $debug = 1;
-    if ($ARGV[2]) {
-	my $msgid = $ARGV[2];
-	if ($msgid =~ s/^0x//) {
-	    $msgid = hex($msgid);
-	} else {
-	    &usage;
-	}
-	&send_and_recv(&mk_nas($msgid));
-	$debug = 0;
-    } else {
-	&nas_set_system_selection_preference; # force LTE
-	#&nas_perform_network_scan;
-    }
-} elsif ($cmd eq 'wms') {
-    $debug = 1;
-    if ($ARGV[2]) {
-	my $msgid = $ARGV[2];
-	if ($msgid =~ s/^0x//) {
-	    $msgid = hex($msgid);
-	} else {
-	    &usage;
-	}
-	&send_and_recv(&mk_wms($msgid));
-	$debug = 0;
-    } else {
+} elsif ($system == QMI_NAS) {
+    &nas_set_system_selection_preference unless $cmd; # force new scan
+} elsif ($system == QMI_WMS) {
+    unless ($cmd) {
 	&wms_list_messages;
 	&wms_raw_read(0,0);
     }
-} elsif ($cmd eq 'mode') {
-    my $mode = $ARGV[2];
+} elsif ($system == QMI_CTL) {
+    my $mode = shift;
     if ($mode == 1 || $mode == 2) {
-	&ctl_set_data_format($mode, $ARGV[3]);
+	&ctl_set_data_format($mode, shift);
     }
-} else {
-    &usage;
+}
+
+# default common command number handling
+if ($cmd =~ s/^0x//) {
+    my $msgid = hex($cmd);
+    my $cid = &get_cid($system);
+
+    # need to temporarily override debug output to force any useful output at all
+    my $olddebug = $debug;
+    $debug = 1;
+    if ($cid) {
+	my $tlv = shift;
+	if ($tlv && $tlv =~ s/^0x//) {
+	    $tlv = hex($tlv);
+	    my $data = pack("C*", map { hex } @ARGV);
+	    &send_and_recv(&mk_qmi($system, $cid, $msgid, { $tlv => $data }));
+	} else {
+	    &send_and_recv(&mk_qmi($system, $cid, $msgid));
+	}
+    }
+    $debug = $olddebug;
 }
 
 # save state for next run
