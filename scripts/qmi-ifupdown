@@ -52,6 +52,9 @@ $family ||= 4;
 
 # need to keep some external state
 my $state = "/etc/network/run/qmistate.$netdev";
+if ($family != 4) {
+    $state .= ".ipv$family";
+}
 
 # per interface config
 my $pin  = &strip_quotes($ENV{'IF_WWAN_PIN'});
@@ -424,6 +427,7 @@ sub dms_verify_pin {
 ## external state management
 
 sub save_wds_state {
+    printf STDERR "$netdev: saving state to \"$state\"\n" if $verbose;
     if (open(X, ">$state")) {
 	if ($wds_handle) {
 	    printf X "%u %u\n", $cid[QMI_WDS], $wds_handle;
@@ -436,6 +440,7 @@ sub save_wds_state {
 }
 
 sub read_wds_state {
+    printf STDERR "$netdev: reading state from \"$state\"\n" if $verbose;
     if (!open(X, $state)) { # this is to be expected if we never saved any...
 	warn "$netdev: unable to open $state: $!\n" if $debug;
 	return;
