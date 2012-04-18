@@ -395,6 +395,41 @@ my %msg = (
 	},
 
     },
+    0x004d => {
+	name => 'GET_SYS_INFO',
+	0x12 => {
+	    name => 'GSM Service Status Info',
+	    decode => sub { &tlv_service_status('GSM', @_) },
+	},
+	0x13 => {
+	    name => 'WCDMA Service Status Info',
+	    decode => sub { &tlv_service_status('WCDMA', @_) },
+	},
+	0x14 => {
+	    name => 'LTE Service Status Info',
+	    decode => sub { &tlv_service_status('LTE', @_) },
+	},
+	0x17 => {
+	    name => 'GSM System Info',
+	    decode => \&tlv_lte_system_info,
+	},
+	0x18 => {
+	    name => 'WDCMA System Info',
+	    decode => \&tlv_lte_system_info,
+	},
+	0x19 => {
+	    name => 'LTE System Info',
+	    decode => \&tlv_lte_system_info,
+	},
+	0x1e => {
+	    name => 'Additional LTE System Info',
+	    decode => sub { sprintf "Geo sys index: 0x%04x", unpack("v", pack("C*", @{$_[0]})) },
+	},
+	0x21 => {
+	    name => 'LTE Voice Support',
+	    decode => sub { 'Voice is '. ($_[0]->[0] ? '' : 'not ') .'supported' },
+	},
+    },
     0x0066 => {
 	name => 'RF_BAND_INFO_IND',
 	0x01 => {
@@ -469,6 +504,8 @@ sub tlv_plmn {
     return sprintf "%u%02u - %s", $mcc, $mnc, substr($datastr, 5, $len);
 }
 
+
+
 # Note that this is different enough from the band preference bitmap to make sharing difficult...
 my %active_band_map = (
     #  0 to 19 => CDMA BC_x
@@ -520,7 +557,7 @@ sub map_active_band {
     }
     return exists($active_band_map{$band}) ? $active_band_map{$band} : "unknown";
 }
- 
+
 sub tlv_rf_band_info {
     my @data = @{shift()};
     my $count = shift(@data);
@@ -566,6 +603,22 @@ sub tlv_detailed_service {
     my ($status, $capability, $hdr_status, $hdr_hybrid, $forbidden) =  @{shift()};
     return "$srv_status_map{$status}, $srv_cap_map{$capability}, HDR: $srv_hdr_status_map{$hdr_status}, " .
 	($hdr_hybrid ? 'H' : 'Not h') . "ybrid, " . ($forbidden ? 'F' : 'Not f') . "orbidden";
+}
+
+sub tlv_service_status {
+    my $system = shift;
+    my ($status, $true_status, $preferred) = @{shift()};
+    return "$system: $srv_status_map{$status}, True $srv_status_map{$true_status}, " . ($preferred ? "" : "Not ") . "preferred";
+}
+
+sub tlv_lte_system_info {
+    my ($servdom_valid, $srvdom, $srvcap_valid, $srvcap, $roam_valid, $roam, $forbidden_valid, $forbidden, $lac_valid, $lac, $cellid_valid, $cellid, $rej_valid, $rej_srv_domain, $rej_cause, $netid_valid, @mcc, @mnc, $tac_valid, $tac );
+    ($servdom_valid, $srvdom, $srvcap_valid, $srvcap, $roam_valid, $roam, $forbidden_valid, $forbidden, $lac_valid, $lac, $cellid_valid, $cellid, $rej_valid, $rej_srv_domain, $rej_cause, $netid_valid, @mcc[0..2], @mnc[0..2], $tac_valid, $tac ) = unpack("C9vCVC4C6Cv", pack("C*", @{shift()}));
+
+    my $mcc = pack("C3", @mcc);
+    my $mnc = pack( $mnc[2] > ord('9') ? "C2" : "C3", @mnc);
+    
+    return "dom: $srv_status_map{$srvdom}, cap: $srv_status_map{$srvcap}, roam: $roam, ". ($forbidden ? 'Not ' : '') .", lac: $lac, cellid: $cellid, reject: $srv_status_map{$rej_srv_domain}, mcc: $mcc, mnc: $mnc, tac: $tac";
 }
 
 my %roam_map = (
@@ -1737,8 +1790,10 @@ if ($system == QMI_WDS) {
 					0x17 => pack("C", 1), # Data Call Status Change Indicator
 			       }));
 
-	# monitor QMI_NAS changes as well
-	&send_and_recv(&mk_nas(0x0024));
+	# monitor QMI_NAS changes as well, regisering interest in band notifications
+	&send_and_recv(&mk_nas(0x0003, {0x13 => pack("C", 1), # Serving System Events
+					0x20 => pack("C", 1), # RF Band Information
+			       }));
 
 	&monitor;
 	$debug = 0;
