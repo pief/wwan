@@ -319,7 +319,10 @@ sub wds_start_network_interface {
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
     $tlv{0x18} = $pw if $pw;
-    $tlv{0x19} = pack("C", $family) if $family;
+
+    # setting new default is required for dual stack operation
+    ## $tlv{0x19} = pack("C", $family) if $family;
+    &send_and_recv(&mk_wds(0x004d, {0x01 => pack("C", $family)})) if $family;
 
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
@@ -327,6 +330,17 @@ sub wds_start_network_interface {
     # need to save handle (and WMS CID!!!) for disconnect
     my $ret = &send_and_recv($req, 60);
     my $status = &verify_status($ret);
+
+
+    ## FIXME: This error:
+    ## Connection failed: status=QMI_ERR_CALL_FAILED, reason=3GPP speciﬁcation deﬁned: MULTI_CONN_TO_SAME_PDN_NOT_ALLOWED [type=6, reason=55]
+    ## can be resolved by doing 
+
+    ## --system=nas 0x23 0x10 2 (packet_detach)
+    ## --system=nas 0x23 0x10 1 (packet_attach)
+
+    ## at least for LTE...
+
     if ($status) {
 	my $v = $ret->{tlvs}{0x11}; # Verbose Call End Reason
 	if ($v) {
