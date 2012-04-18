@@ -362,9 +362,17 @@ my %msg = (
 	    name => 'Mode Preference',
 	    decode => \&tlv_mode_pref,
 	},
+	0x12 => {
+	    name => 'Band Preference',
+	    decode => \&tlv_band_pref,
+	},
 	0x14 => {
 	    name => 'Roaming Preference',
 	    decode => \&tlv_roaming_pref,
+	},
+	0x15 => {
+	    name => 'LTE Band Preference',
+	    decode => \&tlv_lte_band_pref,
 	},
 	0x16 => {
 	    name => 'Network Selection Preference',
@@ -504,6 +512,71 @@ my %mode_map = (
 sub tlv_mode_pref {
     my $mode = unpack("v", pack("C*", @{shift()}));
     return join('|', map { $mode_map{$_} } grep { $mode & $_ } keys %mode_map);
+}
+
+my %band_map = (
+    0 => 'Class 0, A-System',
+    1 => 'Class 0, B-System, Class 0 AB, GSM 850',
+    2 => 'Class 1, all blocks',
+    3 => 'Class 2 placeholder',
+    4 => 'Class 3, A-System',
+    5 => 'Class 4, all blocks',
+    6 => 'Class 5, all blocks',
+    7 => 'GSM DCS 1800',
+    8 => 'GSM Extended GSM (E-GSM) 900',
+    9 => 'GSM Primary GSM (P-GSM) 900',
+    10 => 'Class 6',
+    11 => 'Class 7',
+    12 => 'Class 8',
+    13 => 'Class 9',
+    14 => 'Class 10',
+    15 => 'Class 11',
+    16 => 'GSM 450',
+    17 => 'GSM 480',
+    18 => 'GSM 750',
+    19 => 'GSM 850',
+    20 => 'GSM Railways GSM 900',
+    21 => 'GSM PCS 1900',
+    22 => 'WCDMA Europe, Japan, and China IMT 2100',
+    23 => 'WCDMA U.S. PCS 1900',
+    24 => 'WCDMA Europe and China DCS 1800',
+    25 => 'WCDMA U.S. 1700',
+    26 => 'WCDMA U.S. 850',
+    27 => 'WCDMA Japan 800',
+    28 => 'Class 12',
+    29 => 'Class 14',
+# Bit 30 => 'Reserved',
+    31 => 'Class 15',
+# Bits 32 to 47 => 'Reserved',
+    48 => 'WCDMA Europe 2600',
+    49 => 'WCDMA Europe and Japan 900',
+    50 => 'WCDMA Japan 1700',
+# Bits 51 to 55 => 'Reserved',
+    56 => 'Class 16',
+    57 => 'Class 17',
+    58 => 'Class 18',
+    59 => 'Class 19',
+# Bits 60 to 64 => 'Reserved',
+    );
+
+sub tlv_band_pref {
+    my $bands =  unpack("Q<", pack("C*", @{shift()}));
+    my @res;
+
+    for (my $i = 0; $i < 64; $i++) {
+	push(@res, "\"$band_map{$i}\"" || '"reserved"') if ($bands & 1<<$i);
+    }
+    return join(' + ', @res);
+}
+
+sub tlv_lte_band_pref {
+    my $bands =  unpack("Q<", pack("C*", @{shift()}));
+    my @res;
+
+    for (my $i = 0; $i < 40; $i++) {
+	push(@res, sprintf("%u", $i + 1)) if ($bands & 1<<$i);
+    }
+    return "E-UTRA Operating Bands ". join(', ', @res);
 }
 
 my %service_domain_map = (
@@ -779,7 +852,11 @@ sub get_mgmt_dev {
     my ($usbdev) = split(/:/, $usbif, 2);               # 2-1
     return $ret if (!$usbdev);
 
-    opendir(D, "/sys/class/usb") || return $ret;
+    # first look for a cdc-wdm device attached to the same interface
+    if (!opendir(D, "/sys/class/net/$netdev/device/usb")) {
+	# fall back to use the first cdc-wdm device on the same USB device (FIXME: Follow CDC Union descriptor)
+	opendir(D, "/sys/class/usb") || return $ret;
+    }
     while (my $f = readdir(D)) { # cdc-wdm0 -> ../../devices/pci0000:00/0000:00:1d.7/usb2/2-1/2-1:1.3/usb/cdc-wdm0
 	next unless ($f =~ /^cdc-wdm/);
 	if (readlink("/sys/class/usb/$f") =~ m!/$usbdev/$usbdev:.*/usb/cdc-wdm!) { # found it!
@@ -909,7 +986,7 @@ sub read_match {
 	    my $len = 0;
 	    if (!$raw) {
 		$len = sysread(F, $raw, 512);
-		warn("read $len bytes from $dev\n") if ($debug && $len);
+		warn("[" . localtime . "] read $len bytes from $dev\n") if ($debug && $len);
 	    } else {
 		$len = length($raw);
 		warn "$netdev: last read return multiple packets\n" if $verbose;
@@ -1113,11 +1190,21 @@ sub call_end_reason {
 } 
 
 sub wds_start_network_interface {
+    my $handle = shift;
+
     my %tlv;
+    if ($handle) {
+	$handle =~ s/^0x//;
+	$tlv{0x1} = pack("V", hex($handle));
+    }
     $tlv{0x14} = $apn if $apn;
     $tlv{0x17} = $user if $user;
     $tlv{0x18} = $pw if $pw;
-    $tlv{0x19} = pack("C", $family) if $family;
+## TEST: Set default family pref instead
+##    $tlv{0x19} = pack("C", $family) if $family;
+    
+    printf STDERR "Setting default family to $family: %s\n", &verify_status(&send_and_recv(&mk_wds(0x004d, {0x01 => pack("C", $family)}))) if $family;
+
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
 
     warn "$netdev: connecting...\n" if $verbose;
@@ -1432,8 +1519,8 @@ sub status {
 # This is deprecated - use QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE instead
 sub nas_initiate_network_register  {
     my $req = &mk_nas(0x0022, # QMI_NAS_INITIATE_NETWORK_REGISTER
-		      { 0x01 => pack("C*", 1), # 1 => auto, 2 => manual?
-#			0x10 => pack("vvC", 242, 1, 8), # telenor LTE
+		      { 0x01 => pack("C*", 2), # 1 => auto, 2 => manual?
+			0x10 => pack("vvC", 242, 1, 8), # telenor LTE
 			});
     $debug = 1;
     my $ret = &send_and_recv($req);
@@ -1443,11 +1530,14 @@ sub nas_initiate_network_register  {
 
 
 sub nas_set_system_selection_preference  {
+    my $sel = shift || (
+	  1<<4 # LTE
+	| 1<<3 # UMTS
+	| 1<<2 # GSM
+	);
     my $req = &mk_nas(0x0033, # QMI_NAS_SET_SYSTEM_SELECTION_PREFERENCE
-		      { 0x11 => pack("v", 1<<4 # LTE
-				        | 1<<3 # UMTS
-				        | 1<<2 # GSM
-			    ),
+		      { 0x11 => pack("v",$sel),
+#			0x1b => pack("V",2),
 		      });
     my $ret = &send_and_recv($req);
     return &verify_status($ret);
@@ -1548,7 +1638,8 @@ if ($system == QMI_WDS) {
     # start interface?
     if ($cmd eq 'start') {
 	if (&dms_verify_pin) {
-	    &wds_start_network_interface;
+	    my $handle = shift;
+	    &wds_start_network_interface($handle);
 	} else {
 	    warn "$netdev: cannot start without PIN verification\n";
 	}
@@ -1560,40 +1651,54 @@ if ($system == QMI_WDS) {
     # or just print status?
     } elsif ($cmd eq 'status') {
 	&status;
-    } elsif ($cmd eq 'reset') {
-	warn "Resetting device state: ", $err{&ctl_sync}, "\n";
     } elsif ($cmd eq 'monitor') {
 	$debug = 1;
 	&send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
 					0x15 => pack("C", 1), # Current Data Bearer Technology Indicator
 					0x17 => pack("C", 1), # Data Call Status Change Indicator
 			       }));
+
+	# monitor QMI_NAS changes as well
+	&send_and_recv(&mk_nas(0x0024));
+
 	&monitor;
 	$debug = 0;
     }
 } elsif ($system == QMI_NAS) {
-    &nas_set_system_selection_preference unless $cmd; # force new scan
+    if (!$cmd) {
+	&nas_set_system_selection_preference; # force new scan
+    } elsif ($cmd eq 'lte') {
+	&nas_set_system_selection_preference(1<<4); # force LTE only
+    } elsif ($cmd eq 'register') {
+	&nas_initiate_network_register;
+    } elsif ($cmd eq 'scan') {
+	&nas_perform_network_scan;
+    }
 } elsif ($system == QMI_WMS) {
     unless ($cmd) {
 	&wms_list_messages;
 	&wms_raw_read(0,0);
     }
 } elsif ($system == QMI_CTL) {
-    my $mode = shift;
-    if ($mode == 1 || $mode == 2) {
-	&ctl_set_data_format($mode, shift);
+    if ($cmd eq 'sync') {
+	warn "Resetting device state: ", $err{&ctl_sync}, "\n";
+    } elsif ($cmd eq 'mode') {
+	my $mode = shift;
+	if ($mode == 1 || $mode == 2) {
+	    &ctl_set_data_format($mode, shift);
+	}
     }
 }
 
 # default common command number handling
 if ($cmd && $cmd =~ s/^0x//) {
     my $msgid = hex($cmd);
-    my $cid = &get_cid($system);
+    my $cid = $system == QMI_CTL ? 0 : &get_cid($system);
 
     # need to temporarily override debug output to force any useful output at all
     my $olddebug = $debug;
     $debug = 1;
-    if ($cid) {
+    if (defined($cid)) {
 	my $tlv = shift;
 	if ($tlv && $tlv =~ s/^0x//) {
 	    $tlv = hex($tlv);
