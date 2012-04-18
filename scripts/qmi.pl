@@ -352,6 +352,13 @@ my %msg = (
 	    decode => \&tlv_plmn,
 	},
     },
+    0x0031 => {
+	name => 'GET_RF_BAND_INFO',
+	0x01 => {
+	    name => 'RF Band Information List',
+	    decode => \&tlv_rf_band_info,
+	},
+    },
     0x0034 => {
 	name => 'GET_SYSTEM_SELECTION_PREFERENCE',
 	0x10 => {
@@ -388,6 +395,13 @@ my %msg = (
 	},
 
     },
+    0x0066 => {
+	name => 'RF_BAND_INFO_IND',
+	0x01 => {
+	    name => 'RF Band Information',
+	    decode => \&tlv_rf_band_info,
+	},
+    },
     );
 
 my %registration_map = (
@@ -416,6 +430,7 @@ my %radio_if_map = (
     0x04 => 'GSM',
     0x05 => 'UMTS',
     0x08 => 'LTE',
+    0x09 => 'TD-SCDMA',
     );
 
 sub tlv_serving_system {
@@ -452,6 +467,70 @@ sub tlv_plmn {
     my $datastr = pack("C*", @{shift()});
     my ($mcc, $mnc, $len) = unpack("vvC", $datastr);
     return sprintf "%u%02u - %s", $mcc, $mnc, substr($datastr, 5, $len);
+}
+
+# Note that this is different enough from the band preference bitmap to make sharing difficult...
+my %active_band_map = (
+    #  0 to 19 => CDMA BC_x
+    # 20 to 39 => Reserved
+    40 => 'GSM 450',
+    41 => 'GSM 480',
+    42 => 'GSM 750',
+    43 => 'GSM 850',
+    44 => 'GSM 900 (Extended)',
+    45 => 'GSM 900 (Primary)',
+    46 => 'GSM 900 (Railways)',
+    47 => 'GSM 1800',
+    48 => 'GSM 1900',
+    # 49 to 79 => Reserved
+    80 => 'WCDMA 2100',
+    81 => 'WCDMA PCS 1900',
+    82 => 'WCDMA DCS 1800',
+    83 => 'WCDMA 1700 (U.S.)',
+    84 => 'WCDMA 850',
+    85 => 'WCDMA 800',
+    86 => 'WCDMA 2600',
+    87 => 'WCDMA 900',
+    88 => 'WCDMA 1700 (Japan)',
+    89 => 'reserved',
+    90 => 'WCDMA 1500 (Japan)',
+    91 => 'WCDMA 850 (Japan)',
+    );
+
+sub map_active_band {
+    my $band = shift;
+    if ($band <= 19) {
+	return "BC_$band"; # CDMA
+    }
+    if (($band <= 39) || (($band > 48) && ($band <= 79))) {
+	return "reserved";
+    }
+    if (($band > 119) && ($band <= 151)) {
+	my $x = $band - 119;
+	$x += 2 if ($band > 133);  # there's a hole for band 15 and 16...
+	$x += 15 if ($band > 134); # and one between 17 and 33
+	$x -= 23 if ($band > 142); # then we go back to 18 after 40...
+	$x += 2 if ($band > 146); # and have a whole for band  22 and 23
+	$x += 15 if ($band > 148); # and up to 41 again after 25..
+	return "E-UTRA Operating Band $x";
+    }
+    if (($band > 199) && ($band <= 205)) {
+	my $x = chr(ord('A') + $band - 200);
+	return "TD-SCDMA Band $x";
+    }
+    return exists($active_band_map{$band}) ? $active_band_map{$band} : "unknown";
+}
+ 
+sub tlv_rf_band_info {
+    my @data = @{shift()};
+    my $count = shift(@data);
+    my $datastr = pack("C*", @data);
+    my $ret = '';
+    for (my $i = 0; $i < $count; $i++) {
+	my ($radio_if, $band, $channel) = unpack("Cvv", substr($datastr, $i*5, 5));
+	$ret .= "$radio_if_map{$radio_if} => \"" . &map_active_band($band) . "\" ch $channel, ";
+    }
+    return $ret;
 }
 
 sub tlv_roaming_list {
