@@ -10,6 +10,8 @@ use constant {
     QMI_DMS => 0x02,
     QMI_NAS => 0x03,
     QMI_WMS => 0x05,
+    QMI_PDS => 0x06,
+    QMI_LOC => 0x10,
 };
 
 
@@ -759,6 +761,8 @@ my %sysname = (
     2 => "QMI_DMS",
     3 => "QMI_NAS",
     5 => "QMI_WMS",
+    6 => "QMI_PDS",
+    0x10 => "QMI_LOC",
     );
 
 ### functions used during enviroment variable parsing ###
@@ -1334,7 +1338,6 @@ sub wds_start_network_interface {
     $tlv{0x18} = $pw if $pw;
 ## TEST: Set default family pref instead
 ##    $tlv{0x19} = pack("C", $family) if $family;
-    
     printf STDERR "Setting default family to $family: %s\n", &verify_status(&send_and_recv(&mk_wds(0x004d, {0x01 => pack("C", $family)}))) if $family;
 
     my $req = mk_wds(0x0020, \%tlv); # QMI_WDS_START_NETWORK_INTERFACE
@@ -1360,6 +1363,19 @@ sub wds_set_client_ip_family_pref {
     my $family = shift;
     my $req = &mk_wds(0x004d, # QMI_WDS_SET_CLIENT_IP_FAMILY_PREF
 		      { 0x01 =>  pack("C", $family) });
+    my $ret = &send_and_recv($req);
+    return &verify_status($ret);
+}
+
+# configure some default profile settings
+sub wds_modify_profile {
+    my $profile = shift;
+    my $req = &mk_wds(0x0028, # QMI_WDS_MODIFY_PROFILE_SETTINGS
+		      { 0x01 =>  pack("CC", 0, $profile),
+		        0x10 => "profile$profile", 
+			0x18 => \0 x 33,
+			0x29 => \0 x 34,
+		      });
     my $ret = &send_and_recv($req);
     return &verify_status($ret);
 }
@@ -1572,6 +1588,7 @@ sub get_wds_state {
 
 sub device_info {
     warn "$netdev: Manufacturer: ", &tlv01_ascii(&send_and_recv(&mk_dms(0x0021))), "\n"; # QMI_DMS_GET_DEVICE_MFR
+    warn "$netdev: Model: ", &tlv01_ascii(&send_and_recv(&mk_dms(0x0022))), "\n"; # QMI_DMS_GET_DEVICE_MODEL_ID
     warn "$netdev: Revision: ",  &tlv01_ascii(&send_and_recv(&mk_dms(0x0023))), "\n"; # QMI_DMS_GET_DEVICE_REV_ID
 }
 
@@ -1783,6 +1800,9 @@ if ($system == QMI_WDS) {
     # or just print status?
     } elsif ($cmd eq 'status') {
 	&status;
+    } elsif ($cmd eq 'profile') {
+	my $profile = shift;
+	warn "Modifying profile #$profile: ", $err{&wds_modify_profile($profile)}, "\n";
     } elsif ($cmd eq 'monitor') {
 	$debug = 1;
 	&send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
