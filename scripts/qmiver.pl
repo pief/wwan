@@ -25,15 +25,25 @@ GetOptions(\%opt,
 
 &usage if ($opt{'help'} || !$opt{'vid'} || !$opt{'pid'});
 
-
 my %sysname = (
-    0 => "QMI_CTL",
-    1 => "QMI_WDS",
-    2 => "QMI_DMS",
-    3 => "QMI_NAS",
-    5 => "QMI_WMS",
-    6 => "QMI_PDS",
+    0    => "QMI_CTL",
+    1    => "QMI_WDS",
+    2    => "QMI_DMS",
+    3    => "QMI_NAS",
+    4    => "QMI_QOS",
+    5    => "QMI_WMS",
+    6    => "QMI_PDS",
+    7    => "QMI_AUTH",
+    8    => "QMI_AT",
+    9    => "QMI_VOICE",
+    0xa  => "QMI_CAT",
+    0xb  => "QMI UIM",
+    0xc  => "QMI PBM",
     0x10 => "QMI_LOC",
+    0x11 => "QMI_SAR",
+    0xe0 => "QMI_CAT", # duplicate!
+    0xe1 => "QMI_RMS",
+    0xe2 => "QMI_OMA",
     );
 
 my $usb = Device::USB->new();
