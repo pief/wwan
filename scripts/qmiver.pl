@@ -66,7 +66,8 @@ foreach (@intflist) {
     my $intf = $_->[0];
   
     # supported interfaces must have an interrupt endpoint and may have 2 bulk endpoints
-    if ($intf->bNumEndpoints == 3) {
+    if (($intf->bNumEndpoints == 3 || $intf->bNumEndpoints == 1) &&
+	($intf->endpoints->[0]->bmAttributes == 3)) {  # USB_ENDPOINT_XFER_INT
 	warn "Candidate: ifnum=", $intf->bInterfaceNumber,"\n";
 	&do_qmi($dev, $intf);
     } else {
@@ -185,7 +186,31 @@ sub usage {
 	$0 [--verbose] [--debug] --vid=<idVendor> --pid=<idProduct> [--if=<bInterfaceNumber>]
 
       Example:
-	$0 --vid=1199 --pid=68a2 --if=8
+	$0 --vid=1199 --pid=68a2
+
+ Debugging: off
+ Device: 1199:68a2
+ Unsupported endpoint configuration on ifnum=0
+ Unsupported endpoint configuration on ifnum=2
+ Candidate: ifnum=3
+ claim_interface failed for if 3 - need to unbind first?
+ Candidate: ifnum=8
+ supports 14 QMI subsystems:
+   QMI_CTL (1.5)
+   QMI_WDS (1.12)
+   QMI_DMS (1.6)
+   QMI_NAS (1.8)
+   QMI_QOS (1.3)
+   QMI_WMS (1.3)
+   QMI_PDS (1.10)
+   QMI_AUTH (1.1)
+   QMI_VOICE (2.1)
+   QMI_CAT (2.0)
+   QMI UIM (1.4)
+   QMI PBM (1.4)
+   QMI_SAR (1.0)
+   QMI_RMS (1.0)
+
 
       Note:
 	It is necessary to unbind any driver from the interface(s)
