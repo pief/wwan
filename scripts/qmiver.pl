@@ -18,6 +18,7 @@ GetOptions(\%opt,
 	   'vid=s',
 	   'pid=s',
 	   'if=s',
+	   'force-unbind',
 	   'debug|d+',
 	   'verbose',
 	   'help|h|?',
@@ -80,8 +81,24 @@ sub do_qmi {
     my ($dev, $intf) = @_;
 
     my $ifnum = $intf->bInterfaceNumber;
-    if ($dev->claim_interface($ifnum) < 0) {
-	warn "claim_interface failed for if $ifnum - need to unbind first?\n";
+    my $driver = $dev->get_driver_np($ifnum);
+    if ($driver) {
+	warn "interface $ifnum already bound by the \"$driver\" driver\n" if $opt{'verbose'};
+	if ($opt{'force-unbind'}) {
+	    warn "attempting to unbind - ";
+	    if ($dev->detach_kernel_driver_np($ifnum) < 0) {
+		warn "FAILED\n";
+		return undef;
+	    } else {
+		warn "SUCCESS\n";
+	    }
+	} else {
+	    return undef;
+	}
+    }
+    my $ret = $dev->claim_interface($ifnum);
+    if ($ret < 0) {
+	warn "claim_interface failed ($ret): $!\n";
 	return;
     }
 
@@ -159,7 +176,7 @@ sub send_msg {
 
     warn "control_msg() returned $ret\n" if $opt{'debug'};
     if ($ret != $len) {
-	warn "Failed to send message - control_msg() returned $ret\n";
+	warn "control_msg() failed ($ret): $!\n";
     }
     return $ret;
 }
@@ -183,7 +200,22 @@ sub recv_msg {
 sub usage {
     warn <<EOT
       Usage:
-	$0 [--verbose] [--debug] --vid=<idVendor> --pid=<idProduct> [--if=<bInterfaceNumber>]
+	$0 [--verbose] [--debug] --vid=<idVendor> --pid=<idProduct> [--if=<bInterfaceNumber>] [--force-unbind]
+
+      Options:
+	--verbose
+	    more verbose output
+	--debug
+	    debug output
+	--vid
+	    USB vendor ID
+	--pid
+	    USB product ID
+	--if
+	    USB interface number
+	--force-unbind
+	    attempt to unbind any kernel driver from the interface(s) prior to testing
+
 
       Example:
 	$0 --vid=1199 --pid=68a2
