@@ -10,21 +10,17 @@ use Data::Dumper;
 
 # defaults
 my %opt = (
-    'verbose' => 1, 
     'debug' => 0, 
 );
 
 GetOptions(\%opt,
-	   'vid=s',
-	   'pid=s',
+	   'device=s',
 	   'if=s',
-	   'force-unbind',
 	   'debug|d+',
-	   'verbose',
 	   'help|h|?',
     );
 
-&usage if ($opt{'help'} || !$opt{'vid'} || !$opt{'pid'});
+&usage if ($opt{'help'} || !$opt{'device'});
 
 my %sysname = (
     0    => "QMI_CTL",
@@ -50,10 +46,12 @@ my %sysname = (
 my $usb = Device::USB->new();
 $usb->debug_mode($opt{'debug'});
 
-my $dev = $usb->find_device(hex($opt{'vid'}), hex($opt{'pid'}));
-die "Cannot find any such device: $opt{'vid'}:$opt{'pid'}\n" unless $dev;
+my ($vid, $pid) = map { hex } split(/:/, $opt{'device'});
 
-warn "Device: ", sprintf("%04x:%04x", $dev->idVendor(), $dev->idProduct()), "\n" if $opt{'verbose'};
+my $dev = $usb->find_device($vid, $pid);
+die "Cannot find any such device: $opt{'device'} - $!\n" unless $dev;
+
+warn "Device: ", sprintf("%04x:%04x", $dev->idVendor(), $dev->idProduct()), "\n";
 
 $dev->open();
 
@@ -83,16 +81,9 @@ sub do_qmi {
     my $ifnum = $intf->bInterfaceNumber;
     my $driver = $dev->get_driver_np($ifnum);
     if ($driver) {
-	warn "interface $ifnum already bound by the \"$driver\" driver\n" if $opt{'verbose'};
-	if ($opt{'force-unbind'}) {
-	    warn "attempting to unbind - ";
-	    if ($dev->detach_kernel_driver_np($ifnum) < 0) {
-		warn "FAILED\n";
-		return undef;
-	    } else {
-		warn "SUCCESS\n";
-	    }
-	} else {
+	warn "unbinding interface $ifnum from kernel driver \"$driver\"\n";
+	if ($dev->detach_kernel_driver_np($ifnum) < 0) {
+	    warn "unbinding FAILED\n";
 	    return undef;
 	}
     }
@@ -200,57 +191,25 @@ sub recv_msg {
 sub usage {
     warn <<EOT
       Usage:
-	$0 [--verbose] [--debug] --vid=<idVendor> --pid=<idProduct> [--if=<bInterfaceNumber>] [--force-unbind]
+	$0 [--debug] --device=idVendor:idProduct [--if=bInterfaceNumber]
 
       Options:
-	--verbose
-	    more verbose output
 	--debug
 	    debug output
-	--vid
-	    USB vendor ID
-	--pid
-	    USB product ID
+	--device
+	    USB device ID to test - required
 	--if
 	    USB interface number
-	--force-unbind
-	    attempt to unbind any kernel driver from the interface(s) prior to testing
 
 
       Example:
-	$0 --vid=1199 --pid=68a2
-
- Debugging: off
- Device: 1199:68a2
- Unsupported endpoint configuration on ifnum=0
- Unsupported endpoint configuration on ifnum=2
- Candidate: ifnum=3
- claim_interface failed for if 3 - need to unbind first?
- Candidate: ifnum=8
- supports 14 QMI subsystems:
-   QMI_CTL (1.5)
-   QMI_WDS (1.12)
-   QMI_DMS (1.6)
-   QMI_NAS (1.8)
-   QMI_QOS (1.3)
-   QMI_WMS (1.3)
-   QMI_PDS (1.10)
-   QMI_AUTH (1.1)
-   QMI_VOICE (2.1)
-   QMI_CAT (2.0)
-   QMI UIM (1.4)
-   QMI PBM (1.4)
-   QMI_SAR (1.0)
-   QMI_RMS (1.0)
-
+	$0 --device=1199:68a2
 
       Note:
-	It is necessary to unbind any driver from the interface(s)
-	before testing.  This can be done by unloading the driver
-	or writing to the driver's "unbind" file:
-
-         # echo 2-4:1.8 > /sys/bus/usb/devices/2-4:1.8/driver/unbind
-
+	This script will unbind any driver from the interface(s)
+	before testing. It will not rebind after finishing.  The
+	simplest way to reset is to unplug and replug the
+	device.
 
 EOT
 ;
