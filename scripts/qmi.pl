@@ -780,6 +780,7 @@ Where [options] are
   --[no]verbose
   --[no]debug
   --system=<sysname|number>
+  --monitor
 
 Command is either a hex command number or an alias
 
@@ -817,6 +818,9 @@ my $debug = 0;
 # defaulting to QMI_WDS operations
 my $system = QMI_WDS;
 
+# sleep and read all rcvd messages?
+my $monitor = 0;
+
 ## let command line override defaults
 GetOptions(
     'device=s' => \$netdev,
@@ -828,6 +832,7 @@ GetOptions(
     'verbose!' => \$verbose,
     'debug!' => \$debug,
     'system=s' => \$system,
+    'monitor!' => \$monitor,
     ) || &usage;
 
 # the rest of the command line is left for the actual command to run
@@ -988,14 +993,23 @@ sub get_mgmt_dev {
     my ($usbdev) = split(/:/, $usbif, 2);               # 2-1
     return $ret if (!$usbdev);
 
+    # class name changed from "usb" to "usbmisc" in 3.5!
     # first look for a cdc-wdm device attached to the same interface
-    if (!opendir(D, "/sys/class/net/$netdev/device/usb")) {
-	# fall back to use the first cdc-wdm device on the same USB device (FIXME: Follow CDC Union descriptor)
-	opendir(D, "/sys/class/usb") || return $ret;
+    my $d;
+    foreach ("/sys/class/net/$netdev/device/usb",
+	     "/sys/class/usb",
+	     "/sys/class/net/$netdev/device/usbmisc",
+	     "/sys/class/usbmisc",
+	) {
+	$d = $_;
+	last if (-d $d);
     }
+    opendir(D, $d) || return $ret;
+    $d =~ s!.*/!!; # save class name for matching
+
     while (my $f = readdir(D)) { # cdc-wdm0 -> ../../devices/pci0000:00/0000:00:1d.7/usb2/2-1/2-1:1.3/usb/cdc-wdm0
 	next unless ($f =~ /^cdc-wdm/);
-	if (readlink("/sys/class/usb/$f") =~ m!/$usbdev/$usbdev:.*/usb/cdc-wdm!) { # found it!
+	if (readlink("/sys/class/$d/$f") =~ m!/$usbdev/$usbdev:.*/$d/cdc-wdm!) { # found it!
 	    $ret = "/dev/$f";
 	    last;
 	}
@@ -1204,6 +1218,17 @@ sub ctl_sync {
     return $status;
 }
 
+# a QMI_CTL SET_INSTANCE_ID message might be required before using a QMI_WDS connection?
+sub ctl_set_instance {
+    my $id = shift;
+
+    my $old_debug = $debug;
+    $debug = 1;
+    my $ret = &send_and_recv(&mk_qmi(0, 0, 0x0020, {0x01 => pack("C*", $id)}));
+    $debug = $old_debug;
+    return &verify_status($ret);
+}
+
 # will receive a QMI_CTL sync notification when device is ready after
 # PIN verification
 sub wait_for_sync_ind {
@@ -1243,6 +1268,12 @@ restart:
 	}
 	warn "$netdev: CID request for $sysname{$sys} failed: $err{$status}\n";
     }
+
+    # set instance id
+    if ($sys == QMI_WDS) {
+	&ctl_set_instance(0);
+    }
+
     return $cid[$sys];
 }
 
@@ -1753,23 +1784,23 @@ if (!$dev) {
 open(F, "+<", $dev) || die "open $dev: $!\n";
 autoflush F 1;
 
-if (&is_at) {
-    die "$netdev: no support for AT command $dev yet\n";
-}
+#if (&is_at) {
+#    die "$netdev: no support for AT command $dev yet\n";
+#}
 
 # sanity
-if (!&is_qmi) {
-    die "$netdev: unable to detect $dev protocol\n";
-}
+#if (!&is_qmi) {
+#    die "$netdev: unable to detect $dev protocol\n";
+#}
 
 # at this point we'd like to ensure that CIDs are released
 $SIG{TERM} = \&release_cids;
 $SIG{INT} = \&release_cids;
 
-&device_info if $verbose;
+##&device_info if $verbose;
 
 # get and verify cached data, so we can reuse the QMI_WDS CID at least
-&get_wds_state;
+##&get_wds_state;
 
 # get the command
 my $cmd = shift;
@@ -1786,12 +1817,12 @@ if (exists $ENV{'PHASE'}) {
 if ($system == QMI_WDS) {
     # start interface?
     if ($cmd eq 'start') {
-	if (&dms_verify_pin) {
+#	if (&dms_verify_pin) {
 	    my $handle = shift;
 	    &wds_start_network_interface($handle);
-	} else {
-	    warn "$netdev: cannot start without PIN verification\n";
-	}
+#	} else {
+#	    warn "$netdev: cannot start without PIN verification\n";
+#	}
 
     # stop interface?
     } elsif ($cmd eq 'stop') {
@@ -1804,7 +1835,6 @@ if ($system == QMI_WDS) {
 	my $profile = shift;
 	warn "Modifying profile #$profile: ", $err{&wds_modify_profile($profile)}, "\n";
     } elsif ($cmd eq 'monitor') {
-	$debug = 1;
 	&send_and_recv(&mk_wds(0x0001, {0x10 => pack("C", 1), # Current Channel Rate Indicator
 					0x15 => pack("C", 1), # Current Data Bearer Technology Indicator
 					0x17 => pack("C", 1), # Data Call Status Change Indicator
@@ -1814,9 +1844,7 @@ if ($system == QMI_WDS) {
 	&send_and_recv(&mk_nas(0x0003, {0x13 => pack("C", 1), # Serving System Events
 					0x20 => pack("C", 1), # RF Band Information
 			       }));
-
-	&monitor;
-	$debug = 0;
+	$monitor = 1;
     }
 } elsif ($system == QMI_NAS) {
     if (!$cmd) {
@@ -1838,7 +1866,7 @@ if ($system == QMI_WDS) {
 	warn "Resetting device state: ", $err{&ctl_sync}, "\n";
     } elsif ($cmd eq 'mode') {
 	my $mode = shift;
-	if ($mode == 1 || $mode == 2) {
+	if ($mode == 1 || $mode == 2 || $mode == 3 ) {
 	    &ctl_set_data_format($mode, shift);
 	}
     }
@@ -1867,6 +1895,14 @@ if ($cmd && $cmd =~ s/^0x//) {
 
 # save state for next run
 &save_wds_state;
+
+# monitoring?
+if ($monitor) {
+    my $old = $debug;
+    $debug = 1;
+    &monitor;
+    $debug = $old;
+}
 
 # release all releasable CIDs
 &release_cids;
