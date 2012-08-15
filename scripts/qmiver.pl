@@ -94,7 +94,7 @@ sub do_qmi {
     }
 
     # QMI_CTL_MESSAGE_GET_VERSION_INFO
-    my $qmi = pack("C*", map { hex } qw!01 0b 00 00 00 00 00 08 21 00 00 00!);
+    my $qmi = pack("C*", map { hex } qw!01 0f 00 00 00 00 00 08 21 00 04 00 01 01 00 ff!);
     &send_msg($dev, $ifnum, $qmi, length($qmi));
 
     # may have to skip a few unsolicted messages
