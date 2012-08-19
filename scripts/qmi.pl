@@ -754,6 +754,7 @@ package main;
 use strict;
 use warnings;
 use Getopt::Long;
+use LWP::Simple;
 
 my %sysname = (
     0 => "QMI_CTL",
@@ -1319,6 +1320,13 @@ sub mk_wms {
     return &mk_qmi(QMI_WMS, $cid, @_);
 }
 
+# QMI Position Determination Service (QMI_PDS)
+sub mk_pds {
+    my $cid = &get_cid(QMI_PDS);
+    return undef if (!$cid);
+    return &mk_qmi(QMI_PDS, $cid, @_);
+}
+
 my %srvc_status = (
     1 => "DISCONNECTED",
     2 => "CONNECTED",
@@ -1869,6 +1877,82 @@ if ($system == QMI_WDS) {
 	if ($mode == 1 || $mode == 2 || $mode == 3 ) {
 	    &ctl_set_data_format($mode, shift);
 	}
+    }
+} elsif ($system == QMI_PDS) {
+    if ($cmd eq 'xtra') {
+	my $old = $debug;
+	$debug = 1;
+
+	# 1. setup event report
+	&send_and_recv(&mk_pds(0x0001, {0x23 => pack("C", 1), # Report *extended* external XTRA data requests
+			       }));
+
+	# 2. wait with infinite timeout and matching on PDS Event Report indications
+	my @urls;
+	my $maxsize = 0;
+
+	my $match = {
+	    tf => 1,
+	    sys => QMI_PDS,
+	    cid => &get_cid(QMI_PDS),
+	    flags => 0x04,
+	    ctrl => 0x80,
+	    msgid => 0x0001,
+	};
+
+	my $count = 10;
+	while (!@urls && $count--) {
+	    my $qmi_in = &read_match($match, 0);
+
+	    # TLV 0x14 is "External XTRA Database Request" - too small max file size!
+	    # TLV 0x26 is "Extended External XTRA Database Request"
+	    if ($qmi_in->{tlvs}{0x26}) {
+		my $data = pack("C*", @{$qmi_in->{tlvs}{0x26}});
+		my $num;
+		($maxsize, $num) = unpack("VC", $data);
+		warn "xtra: got $num urls and max file size = $maxsize\n";
+		$data = substr($data, 5);
+		for (my $i = 0; $i < $num; $i++) {
+		    last unless $data; # failsafe
+		    my $len = unpack("C", $data);
+		    push(@urls, substr($data, 1, $len));
+		    $data = substr($data, $len + 1);
+		} 
+
+	    }
+	}
+
+	# 3. download file
+	print Dumper(\@urls);
+
+	my $content;
+	foreach my $url (@urls) {
+	    $content = get($url);
+	    last if $content;
+	}
+
+	# 4. upload file in pieces within 90 seconds from event
+	my $seq = 0;
+	my $total = $content ? length($content) : 0;
+	warn "will upload $total bytes\n";
+	while (($total < $maxsize) && $content) {
+	    my $chunk = substr($content, 0, 1536 );
+	    $content = substr($content, 1536);
+
+	    # QMI_PDS_INJECT_XTRA_DATA
+	    my $ret = &send_and_recv(&mk_pds(0x0037,
+					     {0x01 => pack("Cvv", $seq, $total, length($chunk)) . $chunk
+					     }), 30); # need longer read timeout than default?
+	    my $status = verify_status($ret);
+	    if ($status) {
+		warn "seq=$seq returned $err{$status} ($status)\n";
+		last;
+	    }
+	    $seq++;
+	}
+
+	$debug = $old;
+
     }
 }
 
