@@ -750,6 +750,52 @@ sub tlv {
 1; # eof QMI::NAS;
 
 
+package QMI::PDS;
+use strict;
+use warnings;
+#use QMI;
+use vars qw(@ISA);
+@ISA = qw(QMI);
+{
+my %msg = (
+    0x002b => {
+	name => 'GET_XTRA_PARAMETERS',
+	0x10 => {
+	    name => 'XTRA Database Autodownload',
+	    decode => sub { sprintf "auto: %u, interval %u hours", unpack("Cv", pack("C*", @{shift()}));  },
+	},
+	0x13 => {
+	    name => 'XTRA Database Validity',
+	    decode => sub { sprintf "gps_week: %u, start_offset: %u, valid: %u", unpack("vvv", pack("C*", @{shift()}));  },
+	},
+    },
+    0x0044 => {
+	name => 'GET_GPS_STATE_INFO',
+	0x10 => {
+	    name => 'GPS State Info',
+	    decode => \&tlv_gps_state_info,
+	},
+    },
+    );
+
+sub tlv_gps_state_info {
+    my ($state, $valid, $lat, $long, $hor, $alt, $ver, $tow_ms, $gps_week, $time_unc, $iono_valid, $mask1, $mask2, $mask3, $mask4, $mask5, $mask6, $mask7, $mask8, $mask9, $mask10, $mask11, $mask12, $xtra_gps_week, $xtra_gps_minutes, $xtra_valid_hours ) = unpack("CVQ<Q<VVVVvVCVVVVVVVVVVVVvvv", pack("C*", @{shift()}));
+
+    return "engine=$state, gps_week=$gps_week, xtra_gps_week=$xtra_gps_week, xtra_gps_minutes=$xtra_gps_minutes, xtra_valid_hours=$xtra_valid_hours" ;
+}
+
+sub tlv {
+    my ($msgid, $tlv, $data) = @_;
+    
+    if (exists($msg{$msgid}) && exists($msg{$msgid}->{$tlv})) {
+	return &{$msg{$msgid}->{$tlv}{decode}}($data);
+    }
+    return ''; # => default handling
+}
+
+}
+1; # eof QMI::PDS;
+
 package main;
 use strict;
 use warnings;
@@ -1104,6 +1150,8 @@ sub pretty_print_qmi {
 	    $txt = QMI::WDS::tlv($qmi->{msgid}, $k, $v);
 	} elsif ($qmi->{sys} == QMI_NAS) {
 	    $txt = QMI::NAS::tlv($qmi->{msgid}, $k, $v);
+	} elsif ($qmi->{sys} == QMI_PDS) {
+	    $txt = QMI::PDS::tlv($qmi->{msgid}, $k, $v);
 	}
 	$txt ||= mk_ascii($v);
 
@@ -1884,11 +1932,13 @@ if ($system == QMI_WDS) {
 	$debug = 1;
 
 	# 1. setup event report
-	&send_and_recv(&mk_pds(0x0001, {0x23 => pack("C", 1), # Report *extended* external XTRA data requests
+	&send_and_recv(&mk_pds(0x0001, {
+#	    0x10 => pack("C", 1), # Report NMEA data
+	    0x23 => pack("C", 1), # Report *extended* external XTRA data requests
 			       }));
 
 	# 2. wait with infinite timeout and matching on PDS Event Report indications
-	my @urls;
+	my @urls = ();
 	my $maxsize = 0;
 
 	my $match = {
@@ -1900,9 +1950,9 @@ if ($system == QMI_WDS) {
 	    msgid => 0x0001,
 	};
 
-	my $count = 10;
-	while (!@urls && $count--) {
-	    my $qmi_in = &read_match($match, 0);
+	my $qmi_in;
+	do {
+	    $qmi_in = &read_match($match, 0);
 
 	    # TLV 0x14 is "External XTRA Database Request" - too small max file size!
 	    # TLV 0x26 is "Extended External XTRA Database Request"
@@ -1920,7 +1970,7 @@ if ($system == QMI_WDS) {
 		} 
 
 	    }
-	}
+	} while (!@urls && exists($qmi_in->{tf}));
 
 	# 3. download file
 	print Dumper(\@urls);
