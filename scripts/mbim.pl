@@ -11,6 +11,7 @@ use UUID::Tiny ':std';
 # per interface config
 my %pin; $pin{1} = &strip_quotes($ENV{'IF_WWAN_PIN'}) if $ENV{'IF_WWAN_PIN'};
 my $apn =  &strip_quotes($ENV{'IF_WWAN_APN'});
+my $session = 0;
 
 # output levels
 my $verbose = 1;
@@ -25,13 +26,14 @@ my $mgmt = &strip_quotes($ENV{MGMT}) || "/dev/cdc-wdm0";
 ### functions used during enviroment variable parsing ###
 sub usage {
     print STDERR <<EOH
-Usage: $0 [options]  open|pin|close|monitor
+Usage: $0 [options]  open|caps|pin|close|connect|disconnect|attach|detach|getreg|monitor
 
 Where [options] are
 
   --device=<cdc-wdm> (defaults to $mgmt)
   --pin=<code>
   --apn=<apn>
+  --session=<id>
   --[no]verbose
   --[no]debug
 
@@ -52,6 +54,7 @@ GetOptions(
     'device=s' => \$mgmt,
     'pin=s' => \$pin{1},
     'apn=s' => \$apn,
+    'session=i' => \$session,
     'verbose!' => \$verbose,
     'debug!' => \$debug,
     'help|h|?' => \&usage,
@@ -332,6 +335,112 @@ sub mk_host_error_msg {
     return $buf;
 }
 
+# Table 10‐63: MBIM_CONTEXT_IP_TYPE 
+my %iptype = (
+	0 => 'MBIMContextIPTypeDefault',
+	1 => 'MBIMContextIPTypeIPv4',
+	2 => 'MBIMContextIPTypeIPv6',
+	3 => 'MBIMContextIPTypeIPv4v6',
+	4 => 'MBIMContextIPTypeIPv4AndIPv6',
+    );
+
+# Table 10‐64: MBIM_ACTIVATION_STATE 
+my %actstate = (
+	0 => 'MBIMActivationStateUnknown',
+	1 => 'MBIMActivationStateActivated',
+	2 => 'MBIMActivationStateActivating',
+	3 => 'MBIMActivationStateDeactivated',
+	4 => 'MBIMActivationStateDeactivating',
+    );
+
+
+# Table 10‐65: MBIM_VOICE_CALL_STATE 
+my %voicestate = (
+	0 => 'MBIMVoiceCallStateNone',
+	1 => 'MBIMVoiceCallStateInProgress',
+	2 => 'MBIMVoiceCallStateHangUp',
+    );
+
+# Table 10‐66: MBIM_CONTEXT_TYPES 
+my %context = (
+'MBIMContextTypeNone' => 'B43F758C-A560-4B46-B35E-C5869641FB54',
+'MBIMContextTypeInternet' => '7E5E2A7E-4E6F-7272-736B-656E7E5E2A7E',
+'MBIMContextTypeVpn' => '9B9F7BBE-8952-44B7-83AC-CA41318DF7A0',
+'MBIMContextTypeVoice' => '88918294-0EF4-4396-8CCA-A8588FBC02B2',
+'MBIMContextTypeVideoShare' => '05A2A716-7C34-4B4D-9A91-C5EF0C7AAACC',
+'MBIMContextTypePurchase' => 'B3272496-AC6C-422B-A8C0-ACF687A27217',
+'MBIMContextTypeIMS' => '21610D01-3074-4BCE-9425-B53A07D697D6',
+'MBIMContextTypeMMS' => '46726664-7269-6BC6-9624-D1D35389ACA9',
+'MBIMContextTypeLocal' => 'A57A9AFC-B09F-45D7-BB40-033C39F60DB9',
+    );
+sub type_to_context {
+    my $type = uc(shift);
+    return $context{$type} || '<unknown>';
+}
+
+
+# MBIM_CID_DEVICE_CAPS
+sub mk_cid_device_caps {
+    # query - empty data buffer
+    return &mk_command_msg('BASIC_CONNECT', 1, 0, '');
+}
+
+sub mk_cid_register_state {
+    # query - empty data buffer
+    return &mk_command_msg('BASIC_CONNECT', 9, 0, '');
+}
+
+sub mk_cid_packet_service {
+    my $attach = shift;
+    my $data = pack("V", !$attach); # PacketServiceAction 0 => attach, 1 => detach
+
+    return &mk_command_msg('BASIC_CONNECT', 10, 1, $data);
+}
+
+sub mk_cid_connect {
+    my ($apn, $activate, $sessionid) = @_;
+
+    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
+    $sessionid ||= 0;
+    $apn = encode('utf16le', $apn);
+    my $apnlen = length($apn);
+    # create the data buffer:
+    my $data = pack("V11", 
+		    $sessionid, # SessionId  
+		    !!$activate, # ActivationCommand  
+		    60, # AccessStringOffset
+		    $apnlen, # AccessStringSize  
+		    0, # UserNameOffset  
+		    0, # UserNameSize  
+		    0, # PasswordOffset  
+		    0, # PasswordSize  
+		    0, # Compression  
+		    0, # AuthProtocol  
+		    1, # IPType  (IPv4)
+	);
+    my $type = 0 ? 'Vpn' : 'Internet';
+    $data .= string_to_uuid($context{"MBIMContextType$type"});
+    $data .= $apn;
+    return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
+}
+
+
+
+sub decode_mbim_context {
+    my $info = shift;
+
+    my $id = unpack("V", $info);
+    print "    ContextId:\t$id\n";
+    my $type = uuid_to_string(substr($info, 4, 16));
+    print "    ContextType:\t$type (", &type_to_context($type), ")\n"; 
+
+    my ($apnoff, $apnlen, $useroff, $userlen, $pwoff, $pwlen, $comp, $auth) = unpack("V8", substr($info, 20));
+    print "    AccessString:\t", $apnlen ? substr($info, $apnoff, $apnlen): '<none>', "\n";
+    print "    UserName:\t", $userlen ? substr($info, $useroff, $userlen): '<none>', "\n";
+    print "    Password:\t", $pwlen ? substr($info, $pwoff, $pwlen): '<none>', "\n";
+    print "    Compression:\t$comp\n";
+    print "    AuthProtocol:\t$auth\n";
+}
 
 sub mk_cid_pin {
     my $pin = shift;
@@ -347,6 +456,42 @@ sub mk_cid_pin {
     $data .= encode('utf16le', $pin);
 
     return &mk_command_msg('BASIC_CONNECT', 4, 1, $data);
+}
+
+# Table 10‐24: MBIM_PIN_TYPE 
+my %pintype = (
+	0 => 'MBIMPinTypeNone',
+	1 => 'MBIMPinTypeCustom',
+	2 => 'MBIMPinTypePin1',
+	3 => 'MBIMPinTypePin2	',
+	4 => 'MBIMPinTypeDeviceSimPin',
+	5 => 'MBIMPinTypeDeviceFirstSimPin',
+	6 => 'MBIMPinTypeNetworkPin',
+	7 => 'MBIMPinTypeNetworkSubsetPin',
+	8 => 'MBIMPinTypeServiceProviderPin',
+	9 => 'MBIMPinTypeCorporatePin',
+	10 => 'MBIMPinTypeSubsidyLock',
+	11 => 'MBIMPinTypePuk1',
+	12 => 'MBIMPinTypePuk2',
+	13 => 'MBIMPinTypeDeviceFirstSimPuk',
+	14 => 'MBIMPinTypeNetworkPuk',
+	15 => 'MBIMPinTypeNetworkSubsetPuk',
+	16 => 'MBIMPinTypeServiceProviderPuk',
+	17 => 'MBIMPinTypeCorporatePuk',
+);
+
+# Table 10‐25: MBIM_PIN_STATE 
+my %pinstate = (
+    0 => 'MBIMPinStateUnlocked',
+    1 => 'MBIMPinStateLocked',
+);
+
+sub decode_pin_state {
+    my $info = shift;
+    my ($type, $state, $attempts) = unpack("V3", $info);
+    print "  PINType:\t$type ($pintype{$type})\n";
+    print "  PINState:\t$state ($pinstate{$state})\n";
+    print "  RemainingAttempts:\t$attempts\n";
 }
 
 # Table 10‐37: MBIM_PROVIDER 
@@ -372,10 +517,93 @@ sub decode_mbim_providers {
     }
 }
 
+# Table 10‐44: 3GPP TS 24.008 Cause codes for NwError  
+my %nwerror = (
+    0 => 'none',
+    2 => 'International Mobile Subscriber',
+    4 => 'IMSI unknown in VLR',
+    6 => 'Illegal ME',
+    7 => 'GPRS services not allowed',
+    8 => 'GPRS and non‐GPRS services not allowed',
+    11 => 'PLMN not allowed',
+    12 => 'Location area not allowed',
+    13 => 'Roaming not allowed in this',
+    14 => 'GPRS services not allowed in this PLMN',
+    15 => 'No suitable cells in location area',
+    17 => 'Network failure',
+    22 => 'Congestion',
+    );
+
+
+# Table 10‐46: MBIM_REGISTER_STATE 
+my %regstate = (
+    0 => 'MBIMRegisterStateUnknown',
+    1 => 'MBIMRegisterStateDeregistered',
+    2 => 'MBIMRegisterStateSearching',
+    3 => 'MBIMRegisterStateHome', 
+    4 => 'MBIMRegisterStateRoaming',
+    5 => 'MBIMRegisterStatePartner',
+    6 => 'MBIMRegisterStateDenied'
+    );
+
+# Table 10‐47: MBIM_REGISTER_MODE 
+my %regmode = (
+	0 => 'MBIMRegisterModeUnknown',
+	1 => 'MBIMRegisterModeAutomatic',
+	2 => 'MBIMRegisterModeManual',
+    );
+
+sub utf16_field {
+    my ($buf, $off, $len) = @_;
+    return $len ? decode('utf16le', substr($buf, $off, $len)) : '<none>';
+}
+
+# Table 10‐50: MBIM_REGISTRATION_STATE_INFO 
+sub decode_registration_state {
+    my $info = shift;
+    my ($nwerr, $state, $mode, $availclass, $currclass, 
+	$idoff, $idsize, $nameoff, $namesize,
+	$roamtxt, $roamlen,
+	$flag) = unpack("V12", $info);
+
+    print "    NwError:\t$nwerr ($nwerror{$nwerr})\n";
+    print "    RegisterState:\t$state ($regstate{$state})\n";
+    print "    RegisterMode:\t$mode ($regmode{$mode})\n";
+    printf "    AvailableDataClasses:\t0x%08x\n", $availclass;
+    printf "    CurrentCellularClass:\t0x%08x\n", $currclass;
+    print "    ProviderId:\t", $idsize ? substr($info, $idoff, $idsize): '<none>', "\n";
+    print "    ProviderName:\t", $namesize ? substr($info, $nameoff, $namesize) : '<none>', "\n";
+    print "    RoamingtText:\t", $roamlen ? substr($info, $roamtxt, $roamlen) : '<none>', "\n";
+    printf "    RegistrationFlag:\t0x%08x\n", $flag;    
+}
+
+# Table 10‐53: MBIM_PACKET_SERVICE_STATE 
+my %packetstate = (
+	0 => 'MBIMPacketServiceStateUnknown',
+	1 => 'MBIMPacketServiceStateAttaching',
+	2 => 'MBIMPacketServiceStateAttached',
+	3 => 'MBIMPacketServiceStateDetaching',
+	4 => 'MBIMPacketServiceStateDetached',
+    );
+
 sub decode_basic_connect {
     my ($cid, $info) = @_;
 
-    if ($cid == 2) {
+    if ($cid == 1) { # MBIM_CID_DEVICE_CAPS
+	my ($type, $class, $voiceclass, $simclass, $dataclass, $smscaps, $ctrlcaps, $maxsessions, $custoff, $custlen, $idoff, $idlen, $fwoff, $fwlen, $hwoff, $hwlen) = unpack("V16", $info);
+	print "  DeviceType:\t$type\n";
+	printf "  CellularClass:\t0x%08x\n", $class;
+	printf "  VoiceClass:\t0x%08x\n", $voiceclass;
+	printf "  SIMClass:\t0x%08x\n", $simclass;
+	printf "  DataClass:\t0x%08x\n", $dataclass;
+	printf "  SMSCaps:\t0x%08x\n", $smscaps;
+	printf "  ControlCaps:\t0x%08x\n", $ctrlcaps;
+	print "  MaxSessions:\t$maxsessions\n";
+	print "  CustomDataClass ($custlen):\t", &utf16_field($info, $custoff, $custlen), "\n";
+	print "  DeviceId ($idlen):\t", &utf16_field($info, $idoff, $idlen), "\n";
+	print "  FirmwareInfo ($fwlen):\t", &utf16_field($info, $fwoff, $fwlen), "\n";
+	print "  HardwareInfo ($hwlen):\t", &utf16_field($info, $hwoff, $hwlen), "\n";
+    } elsif ($cid == 2) { # MBIM_CID_SUBSCRIBER_READY_STATUS
 	my ($state, $idoff, $idsize, $iccidoff, $iccidsize, $flags, $ec ) = unpack("VVVVVVV", $info);
 	print "  ReadyState:\t$state\n";
 	print "  SubscriberIdOffset:\t$idoff\n";
@@ -391,19 +619,46 @@ sub decode_basic_connect {
 	print "  SubscriberId:\t$subscriberid\n";
 	print "  SimIccId:\t$iccid\n";
 
-    } elsif ($cid == 4) {
-
-    } elsif ($cid == 7) {
-
-    } elsif ($cid == 9) {
-
-    } elsif ($cid == 11) {
+    } elsif ($cid == 4) { # MBIM_CID_PIN
+	&decode_pin_state($info);
+    } elsif ($cid == 6) { # MBIM_CID_HOME_PROVIDER
+	&decode_mbim_provider($info);
+    } elsif ($cid == 7) { # MBIM_CID_PREFERRED_PROVIDERS
+	&decode_mbim_providers($info);
+    } elsif ($cid == 9) { # MBIM_CID_REGISTER_STATE
+	&decode_registration_state($info);
+    } elsif ($cid == 10) { #MBIM_CID_PACKET_SERVICE
+	my ($nwerr, $state, $class, $upspeed, $downspeed) = unpack("V3Q<2", $info);
+	print "  NwError:\t$nwerr ($nwerror{$nwerr})\n";
+	print "  PacketServiceState:\t$state ($packetstate{$state})\n";
+	printf "  HighestAvailableDataClass:\t0x%08x\n", $class;
+	print "  UplinkSpeed:\t$upspeed\n";
+	print "  DownlinkSpeed:\t$downspeed\n";
+    } elsif ($cid == 11) { # MBIM_CID_SIGNAL_STATE
 	my ($rssi, $errorrate, $interval, $rssitresh, $errorthresh)= unpack("VVVVV", $info);
 	print "  RSSI:\t$rssi\n";
 	print "  ErrorRate:\t$errorrate\n";
 	print "  SignalStrengthInterval:\t$interval\n";
 	print "  RSSIThreshold:\t$rssi\n";
 	print "  ErrorRateThreshold:\t$errorrate\n";
+    } elsif ($cid == 12) { # MBIM_CID_CONNECT
+	my ($id, $state, $voicestate, $iptype)  = unpack("V4", $info);
+	print "  SessionId:\t$id\n";
+	print "  ActivationState:\t$state ($actstate{$state})\n";
+	print "  VoiceCallState:\t$voicestate ($voicestate{$voicestate})\n";
+	print "  IPType:\t$iptype ($iptype{$iptype})\n";
+	my $type = uuid_to_string(substr($info, 16, 16));
+	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
+	my $nwerr = unpack("V", substr($info, 32, 4));
+	print "  NwError:\t$nwerr ($nwerror{$nwerr})\n";
+    } elsif ($cid == 13) { # MBIM_CID_PROVISIONED_CONTEXTS
+	my $ec = unpack("V", $info);
+	print "  ElementCount (EC): $ec\n  ProvisionedContextRefList:\n";
+	for (my $i = 0; $i < $ec; $i++) {
+	    print "  Context #$i:\n";
+	    my ($off, $len) = unpack("VV", substr($info, 4 + 8 * $i, 8));
+	    &decode_mbim_context(substr($info, $off, $len));
+	}
     } else {
 	print "CID $cid decoding is not yet supported\n";
     }
@@ -500,20 +755,36 @@ sub read_mbim {
     warn("reading from $mgmt\n") if $debug;
     eval {
 	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
-	my $raw;
+	my $raw = '';
+	my $msglen = 0;
 	alarm $timeout;
 	do {
 	    my $len = 0;
-	    if (!$raw) {
-		$len = sysread(F, $raw, 4096);
-		warn("[" . localtime . "] read $len bytes from $mgmt\n") if ($debug && $len);
+	    if ($len < 3 || $len < $msglen) {
+		my $tmp;
+		my $n = sysread(F, $tmp, 4096);
+		if ($n) {
+		    $len = $n;
+		    $raw = $tmp;
+		    warn("[" . localtime . "] read $n bytes from $mgmt\n") if $debug;
+		    print "\n---\n" if $debug;
+		    printf "%02x " x $n, unpack("C*", $tmp) if $debug;
+		    print "\n---\n" if $debug;
+		} else {
+		    $found = 1;
+		}
 	    }
-	    if ($len) {
-		print "\n---\n" if $debug;
-		printf "%02x " x length($raw), unpack("C*", $raw) if $debug;
-		print "\n---\n" if $debug;
-		&decode_mbim($raw);
-		$raw = '';
+
+	    # get expected message length
+	    $msglen = unpack("V", substr($raw, 4, 4));
+
+	    if ($len >= $msglen) {
+		$len -= $msglen;
+		&decode_mbim(substr($raw, 0, $msglen));
+		$raw = substr($raw, $msglen);
+		$msglen = 0;
+	    } else {
+		warn "$len < $msglen\n";
 	    }
 	} while (!$found);
 	alarm 0;
@@ -537,10 +808,22 @@ my $cmd = shift;
 
 if ($cmd eq "open") {
     print F &mk_open_msg;
+} elsif ($cmd eq "caps") {
+    print F &mk_cid_device_caps;
 } elsif ($cmd eq "close") {
     print F &mk_close_msg;
 } elsif ($cmd eq "pin") {
     print F &mk_cid_pin($pin{1}) if $pin{1};
+} elsif ($cmd eq "connect") {
+    print F &mk_cid_connect($apn, 1, $session);
+} elsif ($cmd eq "disconnect") {
+    print F &mk_cid_connect('', 0, $session);
+} elsif ($cmd eq "attach") {
+    print F &mk_cid_packet_service(1);
+} elsif ($cmd eq "detach") {
+    print F &mk_cid_packet_service(0);
+} elsif ($cmd eq "getreg") {
+    print F &mk_cid_register_state();
 } elsif ($cmd eq "monitor") {
     &read_mbim;
 } else {
