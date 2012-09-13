@@ -1,4 +1,6 @@
 #!/usr/bin/perl
+# Copyright (c) 2012  Bjørn Mork <bjorn@mork.no>
+# GPLv2
 
 use strict;
 use warnings;
@@ -375,7 +377,8 @@ my %context = (
     );
 sub type_to_context {
     my $type = uc(shift);
-    return $context{$type} || '<unknown>';
+    my ($context) = grep { $context{$_} eq $type } keys %context;
+    return $context || '<unknown>';
 }
 
 
