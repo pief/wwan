@@ -283,7 +283,7 @@ my %cid = (
 sub cid_to_string {
     my ($service, $cid) = @_;
     my ($name) = grep { $cid{$_}->{service} eq $service && $cid{$_}->{cid} == $cid } keys %cid;
-    return $name || '<unknown>';
+    return $name || "<unknown> ($cid)";
 }
 
 # MBIM_MESSAGE_HEADER 
@@ -400,6 +400,19 @@ sub mk_cid_packet_service {
     return &mk_command_msg('BASIC_CONNECT', 10, 1, $data);
 }
 
+sub mk_cid_dss_connect {
+    my ($uuid, $linkstate, $sessionid) = @_;
+
+    warn "Connecting SessionID=$sessionid to \"$uuid\"\n";
+    $sessionid ||= 0;
+    # create the data buffer:
+    my $data = string_to_uuid($uuid). pack("VV", 
+		    $sessionid, # SessionId  
+		    !!$linkstate, # DssLinkState 
+	);
+    return &mk_command_msg('DSS', 1, 1, $data);
+}
+
 sub mk_cid_connect {
     my ($apn, $activate, $sessionid) = @_;
 
@@ -428,7 +441,6 @@ sub mk_cid_connect {
 }
 
 
-
 sub decode_mbim_context {
     my $info = shift;
 
@@ -443,6 +455,11 @@ sub decode_mbim_context {
     print "    Password:\t", $pwlen ? substr($info, $pwoff, $pwlen): '<none>', "\n";
     print "    Compression:\t$comp\n";
     print "    AuthProtocol:\t$auth\n";
+}
+
+
+sub mk_cid_radio_state {
+    return &mk_command_msg('BASIC_CONNECT', 3, 0, '');
 }
 
 sub mk_cid_pin {
@@ -460,6 +477,46 @@ sub mk_cid_pin {
 
     return &mk_command_msg('BASIC_CONNECT', 4, 1, $data);
 }
+
+# Table 10‐11: MBIM_DATA_CLASS 
+my %dataclass = (
+	0x0 => 'MBIMDataClassNone',
+	0x1 => 'MBIMDataClassGPRS',
+	0x2 => 'MBIMDataClassEDGE',
+	0x4 => 'MBIMDataClassUMTS',
+	0x8 => 'MBIMDataClassHSDPA',
+	0x10 => 'MBIMDataClassHSUPA',
+	0x20 => 'MBIMDataClassLTE',
+#   40h - 8000h  Reserved for future GSM classes 
+	0x10000 => 'MBIMDataClass1XRTT',
+	0x20000 => 'MBIMDataClass1XEVDO',
+	0x40000 => 'MBIMDataClass1XEVDORevA',
+	0x80000 => 'MBIMDataClass1XEVDV',
+	0x100000 => 'MBIMDataClass3XRTT',
+	0x200000 => 'MBIMDataClass1XEVDORevB',
+	0x400000 => 'MBIMDataClassUMB',
+# 800000h - 40000000h Reserved for future CDMA classes 
+	0x80000000 => 'MBIMDataClassCustom',
+    );
+
+sub flags_to_dataclass {
+    my $flags = shift;
+    my @class =  map { my $x = $dataclass{$_}; $x =~ s/MBIMDataClass//; $x } grep { $flags & $_ } sort { $a <=> $b } keys %dataclass;
+
+    return join(', ', @class);
+}
+
+
+# Table 10‐16: MBIM_SUBSCRIBER_READY_STATE 
+my %readystate = (
+	0 => 'MBIMSubscriberReadyStateNotInitialized',
+	1 => 'MBIMSubscriberReadyStateInitialized',
+	2 => 'MBIMSubscriberReadyStateSimNotInserted',
+	3 => 'MBIMSubscriberReadyStateBadSim',
+	4 => 'MBIMSubscriberReadyStateFailure',
+	5 => 'MBIMSubscriberReadyStateNotActivated',
+	6 => 'MBIMSubscriberReadyStateDeviceLocked',
+    );
 
 # Table 10‐24: MBIM_PIN_TYPE 
 my %pintype = (
@@ -501,9 +558,9 @@ sub decode_pin_state {
 sub decode_mbim_provider {
     my $info = shift;
     my ($off, $size, $state, $nameoff, $namesize, $class, $rssi, $errorrate)= unpack("VVVVVVVV", $info);
-    print "    ProviderId:\t", $size ? substr($info, $off, $size): '<none>', "\n";
+    print "    ProviderId:\t", &utf16_field($info, $off, $size), "\n";
     print "    ProviderState:\t$state\n";
-    print "    ProviderName:\t", $namesize ? substr($info, $nameoff, $namesize) : '<none>', "\n";
+    print "    ProviderName:\t", &utf16_field($info, $nameoff, $namesize), "\n";
     print "    CellularClass:\t$class\n";
     print "    RSSI:\t$rssi\n";
     print "    ErrorRate:\t$errorrate\n";
@@ -558,7 +615,7 @@ my %regmode = (
 
 sub utf16_field {
     my ($buf, $off, $len) = @_;
-    return $len ? decode('utf16le', substr($buf, $off, $len)) : '<none>';
+    return $len ? "[$len] ". decode('utf16le', substr($buf, $off, $len)) : '[0] <none>';
 }
 
 # Table 10‐50: MBIM_REGISTRATION_STATE_INFO 
@@ -572,11 +629,11 @@ sub decode_registration_state {
     print "    NwError:\t$nwerr ($nwerror{$nwerr})\n";
     print "    RegisterState:\t$state ($regstate{$state})\n";
     print "    RegisterMode:\t$mode ($regmode{$mode})\n";
-    printf "    AvailableDataClasses:\t0x%08x\n", $availclass;
-    printf "    CurrentCellularClass:\t0x%08x\n", $currclass;
-    print "    ProviderId:\t", $idsize ? substr($info, $idoff, $idsize): '<none>', "\n";
-    print "    ProviderName:\t", $namesize ? substr($info, $nameoff, $namesize) : '<none>', "\n";
-    print "    RoamingtText:\t", $roamlen ? substr($info, $roamtxt, $roamlen) : '<none>', "\n";
+    printf "    AvailableDataClasses:\t0x%08x %s\n", $availclass, &flags_to_dataclass($availclass);
+    printf "    CurrentCellularClass:\t0x%08x %s\n", $currclass, &flags_to_dataclass($currclass);
+    print "    ProviderId:\t", &utf16_field($info, $idoff, $idsize), "\n";
+    print "    ProviderName:\t", &utf16_field($info, $nameoff, $namesize), "\n";
+    print "    RoamingtText:\t", &utf16_field($info, $roamtxt, $roamlen), "\n";
     printf "    RegistrationFlag:\t0x%08x\n", $flag;    
 }
 
@@ -589,6 +646,24 @@ my %packetstate = (
 	4 => 'MBIMPacketServiceStateDetached',
     );
 
+# Table 10‐138: MBIM_DEVICE_SERVICE_ELEMENT 
+sub decode_device_service {
+    my $info = shift;
+
+    my $uuid = uuid_to_string(substr($info, 0, 16));
+    my $service = uuid_to_service($uuid);
+    print "  $service ($uuid)\n";
+    my ($payload, $max, $cids)= unpack("V3", substr($info, 16));
+    printf "    DssPayload:\t0x%08x%s%s\n",  $payload, $payload & 0x1 ? "\tout" : '', $payload & 0x2 ? "\tin" : '';
+    print "    MaxDssInstances:\t$max\n";  
+    print "    CidCount:\t$cids\n";
+    my @cids = unpack("V$cids", substr($info, 28, 4 * $cids));
+    print "    CidList:\t", join(', ', @cids), "\n";
+    foreach my $cid (@cids) {
+	print "      ", &cid_to_string($service, $cid), "\n";
+    }
+}
+
 sub decode_basic_connect {
     my ($cid, $info) = @_;
 
@@ -598,30 +673,29 @@ sub decode_basic_connect {
 	printf "  CellularClass:\t0x%08x\n", $class;
 	printf "  VoiceClass:\t0x%08x\n", $voiceclass;
 	printf "  SIMClass:\t0x%08x\n", $simclass;
-	printf "  DataClass:\t0x%08x\n", $dataclass;
+	printf "  DataClass:\t0x%08x %s\n", $dataclass, &flags_to_dataclass($dataclass);
 	printf "  SMSCaps:\t0x%08x\n", $smscaps;
 	printf "  ControlCaps:\t0x%08x\n", $ctrlcaps;
 	print "  MaxSessions:\t$maxsessions\n";
-	print "  CustomDataClass ($custlen):\t", &utf16_field($info, $custoff, $custlen), "\n";
-	print "  DeviceId ($idlen):\t", &utf16_field($info, $idoff, $idlen), "\n";
-	print "  FirmwareInfo ($fwlen):\t", &utf16_field($info, $fwoff, $fwlen), "\n";
-	print "  HardwareInfo ($hwlen):\t", &utf16_field($info, $hwoff, $hwlen), "\n";
+	print "  CustomDataClass:\t", &utf16_field($info, $custoff, $custlen), "\n";
+	print "  DeviceId:\t", &utf16_field($info, $idoff, $idlen), "\n";
+	print "  FirmwareInfo:\t", &utf16_field($info, $fwoff, $fwlen), "\n";
+	print "  HardwareInfo:\t", &utf16_field($info, $hwoff, $hwlen), "\n";
     } elsif ($cid == 2) { # MBIM_CID_SUBSCRIBER_READY_STATUS
-	my ($state, $idoff, $idsize, $iccidoff, $iccidsize, $flags, $ec ) = unpack("VVVVVVV", $info);
-	print "  ReadyState:\t$state\n";
-	print "  SubscriberIdOffset:\t$idoff\n";
-	print "  SubscriberIdSize:\t$idsize\n";
-	print "  SimIccIdOffset:\t$iccidoff\n";
-	print "  SimIccIdSize:\t$iccidsize\n";
+	my ($state, $idoff, $idlen, $iccidoff, $iccidlen, $flags, $ec ) = unpack("VVVVVVV", $info);
+	print "  ReadyState:\t$readystate{$state} ($state)\n";
+	print "  SubscriberId:\t", &utf16_field($info, $idoff, $idlen), "\n";
+	print "  SimIccId:\t", &utf16_field($info, $iccidoff, $iccidlen), "\n";
 	printf "  ReadyInfo:\t0x%08x\n", $flags;
 	print "  ElementCount (EC):\t$ec\n";
-        # FIXME ignoring phone numbers for now...
-	my $subscriberid = $idsize ? decode('utf16le', substr($info, $idoff, $idsize)) : '<none>';
-	my $iccid = $iccidsize ? decode('utf16le', substr($info, $iccidoff, $iccidsize)) : '<none>';
-
-	print "  SubscriberId:\t$subscriberid\n";
-	print "  SimIccId:\t$iccid\n";
-
+	for (my $i = 0; $i < $ec; $i++) {
+	    my ($off, $len) = unpack("VV", substr($info, 28 + 8 * $i, 8));
+	    print "    TelephoneNumber $i:\t", &utf16_field($info, $off, $len), "\n";
+	}
+    } elsif ($cid == 3) { # MBIM_CID_RADIO_STATE  
+	my ($hw, $sw) = unpack("VV", $info);
+	printf "  HwRadioState:\t%s\n", $hw ? 'on' : 'off'; 
+	printf "  SwRadioState:\t%s\n", $sw ? 'on' : 'off'; 
     } elsif ($cid == 4) { # MBIM_CID_PIN
 	&decode_pin_state($info);
     } elsif ($cid == 6) { # MBIM_CID_HOME_PROVIDER
@@ -632,8 +706,8 @@ sub decode_basic_connect {
 	&decode_registration_state($info);
     } elsif ($cid == 10) { #MBIM_CID_PACKET_SERVICE
 	my ($nwerr, $state, $class, $upspeed, $downspeed) = unpack("V3Q<2", $info);
-	print "  NwError:\t$nwerr ($nwerror{$nwerr})\n";
-	print "  PacketServiceState:\t$state ($packetstate{$state})\n";
+	print "  NwError:\t$nwerror{$nwerr} ($nwerr)\n";
+	print "  PacketServiceState:\t$packetstate{$state} ($state)\n";
 	printf "  HighestAvailableDataClass:\t0x%08x\n", $class;
 	print "  UplinkSpeed:\t$upspeed\n";
 	print "  DownlinkSpeed:\t$downspeed\n";
@@ -647,9 +721,9 @@ sub decode_basic_connect {
     } elsif ($cid == 12) { # MBIM_CID_CONNECT
 	my ($id, $state, $voicestate, $iptype)  = unpack("V4", $info);
 	print "  SessionId:\t$id\n";
-	print "  ActivationState:\t$state ($actstate{$state})\n";
-	print "  VoiceCallState:\t$voicestate ($voicestate{$voicestate})\n";
-	print "  IPType:\t$iptype ($iptype{$iptype})\n";
+	print "  ActivationState:\t$actstate{$state} ($state)\n";
+	print "  VoiceCallState:\t$voicestate{$voicestate} ($voicestate)\n";
+	print "  IPType:\t$iptype{$iptype} ($iptype)\n";
 	my $type = uuid_to_string(substr($info, 16, 16));
 	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
 	my $nwerr = unpack("V", substr($info, 32, 4));
@@ -662,19 +736,73 @@ sub decode_basic_connect {
 	    my ($off, $len) = unpack("VV", substr($info, 4 + 8 * $i, 8));
 	    &decode_mbim_context(substr($info, $off, $len));
 	}
+
+    } elsif ($cid == 13) { # MBIM_CID_IP_CONFIGURATION  
+
+    } elsif ($cid == 16) { # MBIM_CID_DEVICE_SERVICES
+	my ($dsc, $max) = unpack("VV", $info);
+	print "  DeviceServicesCount (DSC):\t$dsc\n";
+	print "  MaxDssSessions:\t$max\n";
+	for (my $i = 0; $i < $dsc; $i++) {
+	    my ($off, $len) = unpack("VV", substr($info, 8 + 8 * $i, 8));
+	    &decode_device_service(substr($info, $off, $len));
+	}
+
     } else {
 	print "CID $cid decoding is not yet supported\n";
     }
+}
+
+sub decode_ussd {
+    my ($cid, $info) = @_;
+
+    print "USSD CID $cid decoding is not yet supported\n";
+}
+
+sub decode_phonebook {
+    my ($cid, $info) = @_;
+
+    print "PHONEBOOK CID $cid decoding is not yet supported\n";
+}
+sub decode_stk {
+    my ($cid, $info) = @_;
+
+    print "STK CID $cid decoding is not yet supported\n";
+}
+sub decode_auth {
+    my ($cid, $info) = @_;
+
+    print "AUTH CID $cid decoding is not yet supported\n";
 }
 
 sub decode_sms {
     my ($cid, $info) = @_;
 
-    if ($cid == 1) {
+    if ($cid == 1) { # MBIM_CID_SMS_CONFIGURATION  
+
     } else {
-	print "CID $cid decoding is not yet supported\n";
+	print "SMS CID $cid decoding is not yet supported\n";
     }
 }
+sub decode_dss {
+    my ($cid, $info) = @_;
+    if ($cid == 1) { # MBIM_CID_DSS_CONNECT
+	# no info buffer
+    } else {
+	print "DSS CID $cid decoding is not yet supported\n";
+    }
+}
+
+my %decoder = (
+    "BASIC_CONNECT" => \&decode_basic_connect,
+    "USSD" => \&decode_ussd,
+    "PHONEBOOK" => \&decode_phonebook,
+    "STK" => \&decode_stk,
+    "AUTH" => \&decode_auth,
+    "SMS" => \&decode_sms,
+    "DSS" => \&decode_dss,
+    );
+
 
 sub decode_mbim {
     my $msg = shift;
@@ -687,11 +815,11 @@ sub decode_mbim {
     printf "  TransactionId:\t%d\n", $tid;
     if ($type == 0x80000001) { # MBIM_OPEN_DONE
 	my $status = unpack("V", substr($msg, 12));
-	print "Status:\t$status (", &status_to_string($status), ")\n";
+	print &status_to_string($status), " ($status)\n";
 
     } elsif ($type == 0x80000002) { # MBIM_CLOSE_DONE  
  	my $status = unpack("V", substr($msg, 12));
-	print "Status:\t$status (", &status_to_string($status), ")\n";
+	print &status_to_string($status), " ($status)\n";
 
     } elsif ($type == 0x80000003) { # MBIM_COMMAND_DONE  
 	my ($total, $current) = unpack("VV", substr($msg, 12)); # FragmentHeader  
@@ -701,48 +829,45 @@ sub decode_mbim {
 
 	my $uuid = uuid_to_string(substr($msg, 20, 16));
 	my $service = &uuid_to_service($uuid);
-	print "DeviceServiceId:\t$uuid ($service)\n";
+	print "$service ($uuid)\n";
 
 	my ($cid, $status, $infolen) = unpack("VVV", substr($msg, 36));
 	my $info = substr($msg, 48);
-	print "CID:\t$cid (", &cid_to_string($service, $cid), ")\n";
-	print "Status:\t$status (", &status_to_string($status), ")\n";
-
-	print "InformationBufferLength:\t$infolen\n";
-	##print "InformationBuffer:\t$info\n";
+	print &cid_to_string($service, $cid), " ($cid)\n";
+	print &status_to_string($status), " ($status)\n";
+	print "InformationBuffer [$infolen]:\n";
 
 	if ($infolen != length($info)) {
 	    print "Fragmented data is not yet supported\n";
-	} elsif ($service eq 'BASIC_CONNECT') {
-	    &decode_basic_connect($cid, $info);
+	} elsif (exists($decoder{$service})) {
+	    $decoder{$service}($cid, $info);
 	} else {
 	    print "decoding of $service CIDs is not yet supported\n";
 	}
-	    
     } elsif ($type == 0x80000004) { # MBIM_FUNCTION_ERROR_MSG  
 	my $status = unpack("V", substr($msg, 12));
-	print "ErrorStatusCode:\t$status (", &error_to_string($status), ")\n";
+	print &error_to_string($status), "($status)\n";
     } elsif ($type == 0x80000007) { # MBIM_INDICATE_STATUS_MSG  
 	my ($total, $current) = unpack("VV", substr($msg, 12)); # FragmentHeader  
 	print "MBIM_FRAGMENT_HEADER\n";
-	printf "  TotalFragments:\t0x%08x\n", $total;
-	printf "  CurrentFragment:\t0x%08x\n", $current;
+	print "  TotalFragments:\t$total\n";
+	print "  CurrentFragment:\t$current\n";
 
 	my $uuid = uuid_to_string(substr($msg, 20, 16));
 	my $service = &uuid_to_service($uuid);
-	print "DeviceServiceId:\t$uuid ($service)\n";
+	print "$service ($uuid)\n";
 
 	my ($cid, $infolen) = unpack("VV", substr($msg, 36));
 	my $info = substr($msg, 44);
-	print "CID:\t$cid (", &cid_to_string($service, $cid), ")\n";
+	print &cid_to_string($service, $cid), " ($cid)\n";
 
-	print "InformationBufferLength:\t$infolen\n";
+	print "InformationBuffer [$infolen]:\n";
 	##print "InformationBuffer:\t$info\n";
 
 	if ($infolen != length($info)) {
 	    print "Fragmented data is not yet supported\n";
-	} elsif ($service eq 'BASIC_CONNECT') {
-	    &decode_basic_connect($cid, $info);
+	} elsif (exists($decoder{$service})) {
+	    $decoder{$service}($cid, $info);
 	} else {
 	    print "decoding of $service CIDs is not yet supported\n";
 	}
@@ -827,6 +952,14 @@ if ($cmd eq "open") {
     print F &mk_cid_packet_service(0);
 } elsif ($cmd eq "getreg") {
     print F &mk_cid_register_state();
+} elsif ($cmd eq "getradiostate") {
+    print F &mk_cid_radio_state;
+} elsif ($cmd eq "getservices") {
+    print F &mk_command_msg('BASIC_CONNECT', 16, 0, '');
+} elsif ($cmd eq "dssconnect") {
+    print F &mk_cid_dss_connect(shift, 1, $session);
+} elsif ($cmd eq "dssdisconnect") {
+    print F &mk_cid_dss_connect(shift, 0, $session);
 } elsif ($cmd eq "monitor") {
     &read_mbim;
 } else {
