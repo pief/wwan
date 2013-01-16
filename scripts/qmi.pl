@@ -869,7 +869,8 @@ Where [options] are
 Command is either a hex command number or an alias
 
 TLV depend on command and is on the format
-  0x00 d a t a
+  0x00 01 02 0x10 00 00 00 00
+i.e a stream of TLVs starting with 0x followed by the raw contents, all encoded as hex bytes
 
 EOH
     ;
@@ -2052,14 +2053,33 @@ if ($cmd && $cmd =~ s/^0x//) {
     my $olddebug = $debug;
     $debug = 1;
     if (defined($cid)) {
-	my $tlv = shift;
-	if ($tlv && $tlv =~ s/^0x//) {
-	    $tlv = hex($tlv);
-	    my $data = pack("C*", map { hex } @ARGV);
-	    &send_and_recv(&mk_qmi($system, $cid, $msgid, { $tlv => $data }));
-	} else {
-	    &send_and_recv(&mk_qmi($system, $cid, $msgid));
+	# anything else is considered TLV contents
+	#  e.g:  0x01 00 0x10 01 0f => { 0x01 => 0, 0x10 => 0x0f01 }
+	my $tlv;
+	my @data;
+	my %msg = ();
+	foreach my $arg (@ARGV) {
+	    # anything starting with 0x is considered a new TLV number
+	    if ($arg =~ s/^0x([0-9a-f]{1,2})$/$1/i) {
+		if ($tlv) {
+		    # all TLVs need some data
+		    &usage unless @data;
+		    $msg{$tlv} = pack("C*", @data);
+		    @data = ();
+		}
+		$tlv = hex($arg);
+	    } elsif ($tlv && $arg =~ /^[0-9a-f]{1,2}$/i) {
+		push(@data, hex($arg));
+	    } else {
+		&usage;
+	    }
 	}
+	if ($tlv) {
+	    # all TLVs need some data
+	    &usage unless @data;
+	    $msg{$tlv} = pack("C*", @data);
+	}
+	&send_and_recv(&mk_qmi($system, $cid, $msgid, \%msg));
     }
     $debug = $olddebug;
 }
