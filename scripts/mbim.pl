@@ -302,12 +302,30 @@ sub push_fragment_header {
 sub mk_open_msg {
     my $buf = &init_msg_header(1); # MBIM_OPEN_MSG  
     $buf = &_push($buf, "V", 4096); # MaxControlTransfer 
+
+    if ($debug) {
+	my $n = length($buf);
+	warn("[" . localtime . "] sending $n bytes to $mgmt\n");
+	print "\n---\n";
+	printf "%02x " x $n, unpack("C*", $buf);
+	print "\n---\n";
+    }
+
     return $buf;
 }
 
 # MBIM_CLOSE_MSG
 sub mk_close_msg {
     my $buf = &init_msg_header(2); # MBIM_CLOSE_MSG  
+
+    if ($debug) {
+	my $n = length($buf);
+	warn("[" . localtime . "] sending $n bytes to $mgmt\n");
+	print "\n---\n";
+	printf "%02x " x $n, unpack("C*", $buf);
+	print "\n---\n";
+    }
+
     return $buf;
 }
 
@@ -326,6 +344,14 @@ sub mk_command_msg {
 		  length($info), # InformationBufferLength  
 	);
     $buf = &_push($buf, "a*", $info);  # InformationBuffer  
+
+    if ($debug) {
+	my $n = length($buf);
+	warn("[" . localtime . "] sending $n bytes to $mgmt\n");
+	print "\n---\n";
+	printf "%02x " x $n, unpack("C*", $buf);
+	print "\n---\n";
+    }
     return $buf;
 }
 
