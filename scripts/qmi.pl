@@ -354,6 +354,17 @@ my %msg = (
 	    decode => \&tlv_plmn,
 	},
     },
+    0x0026 => {
+	name => 'GET_PREFERRED_NETWORKS',
+	0x10 => {
+	    name => '3GPP Preferred Networks',
+	    decode => \&tlv_pref_nets,
+	},
+ 	0x11 => {
+	    name => 'Static 3GPP Preferred Networks',
+	    decode => \&tlv_pref_nets,
+	},
+   },
     0x0031 => {
 	name => 'GET_RF_BAND_INFO',
 	0x01 => {
@@ -506,6 +517,32 @@ sub tlv_plmn {
     return sprintf "%u%02u - %s", $mcc, $mnc, substr($datastr, 5, $len);
 }
 
+my %rat_map = (
+    1<<15 => 'UMTS',
+    1<<14 => 'LTE',
+    1<<7  => 'GSM',
+    1<<6  => 'GSM compat',
+    );
+
+sub decode_rat {
+    my $rat = shift;
+    my @rat;
+    for (my $i = 0; $i < 16; $i++) {
+	push(@rat, $rat_map{1<<$i} || 'unknown') if ($rat & 1<<$i);
+    }
+    return @rat ? join('|', @rat) : 'any';
+}
+
+sub tlv_pref_nets {
+    my $datastr = pack("C*", @{shift()});
+    my $count = unpack("v", $datastr);
+    my $ret = '';
+    for (my $i = 0; $i < $count; $i++) {
+	my ($mcc, $mnc, $rat) = unpack("vvv", substr($datastr, 2 + $i*6, 6));
+	$ret .= sprintf "\n\t%u%02u (%s)", $mcc, $mnc, &decode_rat($rat);
+    }
+    return $ret;
+}
 
 
 # Note that this is different enough from the band preference bitmap to make sharing difficult...
