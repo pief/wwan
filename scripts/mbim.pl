@@ -246,6 +246,9 @@ my %uuid = (
 # "well known" vendor specific services
     UUID_EXT_QMUX      => 'd1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3', # ref unknown...
     UUID_MULTICARRIER  => '8b569648-628d-4653-9b9f-1025404424e1', # ref http://feishare.com/attachments/article/252/implementing-multimode-multicarrier-devices.pdf
+    UUID_MSFWID        => 'e9f7dea2-feaf-4009-93ce-90a3694103b6', # http://msdn.microsoft.com/en-us/library/windows/hardware/jj248721.aspx
+
+
     );
 
 sub uuid_to_service {
@@ -280,27 +283,38 @@ my %cid = (
     'MBIM_CID_EMERGENCY_MODE' => { 'service' => 'BASIC_CONNECT', 'cid' => 22, },
     'MBIM_CID_IP_PACKET_FILTERS' => { 'service' => 'BASIC_CONNECT', 'cid' => 23, },
     'MBIM_CID_MULTICARRIER_PROVIDERS' => { 'service' => 'BASIC_CONNECT', 'cid' => 24, },
+
     'MBIM_CID_SMS_CONFIGURATION' => { 'service' => 'SMS', 'cid' => 1, },
     'MBIM_CID_SMS_READ' => { 'service' => 'SMS', 'cid' => 2, },
     'MBIM_CID_SMS_SEND' => { 'service' => 'SMS', 'cid' => 3, },
     'MBIM_CID_SMS_DELETE' => { 'service' => 'SMS', 'cid' => 4, },
     'MBIM_CID_SMS_MESSAGE_STORE_STATUS' => { 'service' => 'SMS', 'cid' => 5, },
+
     'MBIM_CID_USSD' => { 'service' => 'USSD', 'cid' => 1, },
+
     'MBIM_CID_PHONEBOOK_CONFIGURATION' => { 'service' => 'PHONEBOOK', 'cid' => 1, },
     'MBIM_CID_PHONEBOOK_READ' => { 'service' => 'PHONEBOOK', 'cid' => 2, },
     'MBIM_CID_PHONEBOOK_DELETE' => { 'service' => 'PHONEBOOK', 'cid' => 3, },
     'MBIM_CID_PHONEBOOK_WRITE' => { 'service' => 'PHONEBOOK', 'cid' => 4, },
+
     'MBIM_CID_STK_PAC' => { 'service' => 'STK', 'cid' => 1, },
     'MBIM_CID_STK_TERMINAL_RESPONSE' => { 'service' => 'STK', 'cid' => 2, },
     'MBIM_CID_STK_ENVELOPE' => { 'service' => 'STK', 'cid' => 3, },
+
     'MBIM_CID_AKA_AUTH' => { 'service' => 'AUTH', 'cid' => 1, },
     'MBIM_CID_AKAP_AUTH' => { 'service' => 'AUTH', 'cid' => 2, },
     'MBIM_CID_SIM_AUTH' => { 'service' => 'AUTH', 'cid' => 3, },
+
     'MBIM_CID_DSS_CONNECT' => { 'service' => 'DSS', 'cid' => 1, },
 
-# "well known" vendor specific services
+## "well known" vendor specific services
     'MBIM_CID_QMI' => { 'service' => 'EXT_QMUX', 'cid' => 1, },
 
+    'MBIM_CID_MULTICARRIER_CAPABILITIES' => { 'service' => 'MULTICARRIER', 'cid' => 1, },
+    'MBIM_CID_LOCATION_INFO' => { 'service' => 'MULTICARRIER', 'cid' => 2, },
+    'MBIM_CID_MULTICARRIER_CURRENT_CID_LIST' => { 'service' => 'MULTICARRIER', 'cid' => 3, },
+
+    'MBIM_CID_MSFWID_FIRMWAREID' => { 'service' => 'MSFWID', 'cid' => 1, },
     );
 
 
@@ -856,6 +870,16 @@ sub decode_ext_qmux {
     }
 }
 
+sub decode_msfwid {
+    my ($cid, $info) = @_;
+
+    if ($cid == 1) { # MBIM_CID_MSFWID_FIRMWAREID
+	print "  FirmwareID:\t", uuid_to_string($info), "\n";
+    } else {
+	print "MSFWID $cid decoding is not yet supported\n";
+    }
+}
+
 my %decoder = (
     "BASIC_CONNECT" => \&decode_basic_connect,
     "USSD" => \&decode_ussd,
@@ -867,6 +891,8 @@ my %decoder = (
 
 #vendor specific
     "EXT_QMUX" => \&decode_ext_qmux,
+
+    "MSFWID" => \&decode_msfwid,
     );
 
 
