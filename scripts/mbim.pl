@@ -25,10 +25,14 @@ my $monitor = 0;
 # management device
 my $mgmt = &strip_quotes($ENV{MGMT}) || "/dev/cdc-wdm0";
 
+# QMI specifics
+my $qmisys;
+my $qmicid;
+
 ### functions used during enviroment variable parsing ###
 sub usage {
     print STDERR <<EOH
-Usage: $0 [options]  open|caps|pin|close|connect|disconnect|attach|detach|getreg|monitor
+Usage: $0 [options]  open|caps|pin|close|connect|disconnect|attach|detach|getreg|getservices|monitor|qmi|getunknown
 
 Where [options] are
 
@@ -38,6 +42,14 @@ Where [options] are
   --session=<id>
   --[no]verbose
   --[no]debug
+
+only for "qmi" command:
+  --qmisys=<hh>
+  --qmicid=<hh>
+
+followed by QMI message number and TLVs as a combination of hex values and byte streams
+e.g
+  0x0024 0x01 00 0x10 01 0f
 
 EOH
     ;
@@ -59,6 +71,10 @@ GetOptions(
     'session=i' => \$session,
     'verbose!' => \$verbose,
     'debug!' => \$debug,
+
+    'qmisys=s' => \$qmisys,
+    'qmicid=i' => \$qmicid,
+
     'help|h|?' => \&usage,
     ) || &usage;
 
@@ -226,6 +242,10 @@ my %uuid = (
     UUID_STK           => 'd8f20131-fcb5-4e17-8602-d6ed3816164c',
     UUID_AUTH          => '1d2b5ff7-0aa1-48b2-aa52-50f15767174e',
     UUID_DSS           => 'c08a26dd-7718-4382-8482-6e0d583c4d0e',
+
+# "well known" vendor specific services
+    UUID_EXT_QMUX      => 'd1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3', # ref unknown...
+    UUID_MULTICARRIER  => '8b569648-628d-4653-9b9f-1025404424e1', # ref http://feishare.com/attachments/article/252/implementing-multimode-multicarrier-devices.pdf
     );
 
 sub uuid_to_service {
@@ -277,6 +297,10 @@ my %cid = (
     'MBIM_CID_AKAP_AUTH' => { 'service' => 'AUTH', 'cid' => 2, },
     'MBIM_CID_SIM_AUTH' => { 'service' => 'AUTH', 'cid' => 3, },
     'MBIM_CID_DSS_CONNECT' => { 'service' => 'DSS', 'cid' => 1, },
+
+# "well known" vendor specific services
+    'MBIM_CID_QMI' => { 'service' => 'EXT_QMUX', 'cid' => 1, },
+
     );
 
 
@@ -333,7 +357,7 @@ sub mk_close_msg {
 sub mk_command_msg {
     my ($service, $cid, $type, $info) = @_;
 
-    my $uuid = string_to_uuid($uuid{"UUID_$service"}) || return '';
+    my $uuid = string_to_uuid($uuid{"UUID_$service"} || $service) || return '';
     my $buf = &init_msg_header(3); # MBIM_COMMAND_MSG  
     $buf = &push_fragment_header($buf, 1, 0);
     $uuid =~ tr/-//d;
@@ -819,6 +843,19 @@ sub decode_dss {
     }
 }
 
+# use the external "qmiparse" utility to decode the embedded QMUX
+sub decode_ext_qmux {
+    my ($cid, $info) = @_;
+
+    if ($cid == 1) { # MBIM_CID_QMI
+	open(P, "|qmiparse") || return;
+	print P $info;
+	close(P);
+    } else {
+	print "EXT_QMUX CID $cid decoding is not yet supported\n";
+    }
+}
+
 my %decoder = (
     "BASIC_CONNECT" => \&decode_basic_connect,
     "USSD" => \&decode_ussd,
@@ -827,6 +864,9 @@ my %decoder = (
     "AUTH" => \&decode_auth,
     "SMS" => \&decode_sms,
     "DSS" => \&decode_dss,
+
+#vendor specific
+    "EXT_QMUX" => \&decode_ext_qmux,
     );
 
 
@@ -866,9 +906,11 @@ sub decode_mbim {
 	if ($infolen != length($info)) {
 	    print "Fragmented data is not yet supported\n";
 	} elsif (exists($decoder{$service})) {
-	    $decoder{$service}($cid, $info);
+	    $decoder{$service}($cid, $info) if $infolen; # Only on success!
 	} else {
 	    print "decoding of $service CIDs is not yet supported\n";
+	    printf "%02x " x $infolen, unpack("C*", $info);
+	    print "\n";	    
 	}
     } elsif ($type == 0x80000004) { # MBIM_FUNCTION_ERROR_MSG  
 	my $status = unpack("V", substr($msg, 12));
@@ -950,6 +992,98 @@ sub read_mbim {
 }
 
 
+### QMI stuff ###
+
+# QMI_CTL_MESSAGE_GET_VERSION_INFO
+my $qmiver = pack("C*", map { hex } qw!01 0f 00 00 00 00 00 08 21 00 04 00 01 01 00 ff!);
+
+my %sysname = (
+    0    => "QMI_CTL",
+    1    => "QMI_WDS",
+    2    => "QMI_DMS",
+    3    => "QMI_NAS",
+    4    => "QMI_QOS",
+    5    => "QMI_WMS",
+    6    => "QMI_PDS",
+    7    => "QMI_AUTH",
+    8    => "QMI_AT",
+    9    => "QMI_VOICE",
+    0xa  => "QMI_CAT2",
+    0xb  => "QMI UIM",
+    0xc  => "QMI PBM",
+    0xe  => "QMI RMTFS",
+    0x10 => "QMI_LOC",
+    0x11 => "QMI_SAR",
+    0x14 => "QMI_CSD",
+    0x15 => "QMI_EFS",
+    0x17 => "QMI_TS",
+    0x18 => "QMI_TMD",
+    0x1a => "QMI_WDA",
+    0x1e => "QMI_QCMAP",
+    0x24 => "QMI_PDC",
+    0xe0 => "QMI_CAT", # duplicate!
+    0xe1 => "QMI_RMS",
+    0xe2 => "QMI_OMA",
+    );
+
+sub qmi_sysnum {
+    my $sys = uc(shift);
+
+    return $sys if ($sys =~ /^\d+$/);
+
+    if ($sys =~ s/^0X//) {
+	return hex($sys);
+    }
+
+    $sys = 'QMI_'. $sys unless ($sys =~ /^QMI_/);
+    my ($num) = grep { $sys eq $sysname{$_} } keys %sysname;
+    return $num || 0;
+}
+
+# create a QMI message
+sub mk_qmi {
+    my $sys = &qmi_sysnum(shift);
+    my $cid = shift || 1;
+    my $msgid = shift;
+    return '' unless ($msgid =~ s/^0x([0-9a-f]{4})$/$1/i);
+    $msgid = hex($msgid);
+
+    # anything else is considered TLV contents
+    #  e.g:  0x01 00 0x10 01 0f => { 0x01 => 0, 0x10 => 0x0f01 }
+    my $tlv;
+    my @data;
+    my $tlvbytes = '';
+    foreach my $arg (@_) {
+	# anything starting with 0x is considered a new TLV number
+	if ($arg =~ s/^0x([0-9a-f]{2})$/$1/i) {
+	    if ($tlv) {
+		# all TLVs need some data
+		return '' unless @data;
+		$tlvbytes .= pack("CvC*", $tlv, $#data, @data);
+		@data = ();
+	    }
+	    $tlv = hex($arg);
+	} elsif ($tlv && $arg =~ /^[0-9a-f]{2}$/i) {
+	    push(@data, hex($arg));
+	} else {
+	    return '';
+	}
+    }
+
+    # finish up the last TLV
+    if ($tlv) {
+	# all TLVs need some data
+	return '' unless @data;
+	$tlvbytes .= pack("CvC*", $tlv, $#data, @data);
+    }
+
+    my $tlvlen = length($tlvbytes);
+    if ($sys == 0) { # QMI_CTL
+	return pack("CvCCCCCvv", 1, 11 + $tlvlen, 0, 0, 0, 0, $tid, $msgid, $tlvlen) . $tlvbytes;
+    } else {
+	return pack("CvCCCCvvv", 1, 12 + $tlvlen, 0, $sys, $cid, 0, $tid, $msgid, $tlvlen) . $tlvbytes;
+    }
+}  
 
 ### main ###
 
@@ -988,6 +1122,18 @@ if ($cmd eq "open") {
     print F &mk_cid_dss_connect(shift, 0, $session);
 } elsif ($cmd eq "monitor") {
     &read_mbim;
+} elsif ($cmd eq "qmi") {
+    if (defined($qmisys)) {
+	print F &mk_command_msg('EXT_QMUX', 1, 1, &mk_qmi($qmisys, $qmicid, @ARGV));
+    } else {
+	print F &mk_command_msg('EXT_QMUX', 1, 1, pack("C*", map { hex } @ARGV));
+    }
+} elsif ($cmd eq "qmiver") {
+    print F &mk_command_msg('EXT_QMUX', 1, 1, $qmiver);
+} elsif ($cmd eq "unknown") {
+    print F &mk_command_msg(shift, shift, 1, pack("C*", map { hex } @ARGV));
+} elsif ($cmd eq "getunknown") {
+    print F &mk_command_msg(shift, shift, 0, pack("C*", map { hex } @ARGV));
 } else {
     &usage;
 }
