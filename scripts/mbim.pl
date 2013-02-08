@@ -247,7 +247,7 @@ my %uuid = (
     UUID_EXT_QMUX      => 'd1a30bc2-f97a-6e43-bf65-c7e24fb0f0d3', # ref unknown...
     UUID_MULTICARRIER  => '8b569648-628d-4653-9b9f-1025404424e1', # ref http://feishare.com/attachments/article/252/implementing-multimode-multicarrier-devices.pdf
     UUID_MSFWID        => 'e9f7dea2-feaf-4009-93ce-90a3694103b6', # http://msdn.microsoft.com/en-us/library/windows/hardware/jj248721.aspx
-
+    UUID_MS_HOSTSHUTDOWN => '883b7c26-985f-43fa-9804-27d7fb80959c', # http://msdn.microsoft.com/en-us/library/windows/hardware/jj248720.aspx
 
     );
 
@@ -315,6 +315,8 @@ my %cid = (
     'MBIM_CID_MULTICARRIER_CURRENT_CID_LIST' => { 'service' => 'MULTICARRIER', 'cid' => 3, },
 
     'MBIM_CID_MSFWID_FIRMWAREID' => { 'service' => 'MSFWID', 'cid' => 1, },
+
+    'MBIM_CID_MS HOSTSHUTDOWN' => { 'service' => 'MS_HOSTSHUTDOWN', 'cid' => 1, },
     );
 
 
