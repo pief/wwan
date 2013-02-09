@@ -825,10 +825,24 @@ sub decode_ussd {
     print "USSD CID $cid decoding is not yet supported\n";
 }
 
+# Table 10‐113: MBIM_PHONEBOOK_STATE 
+my %phonebookstate = (
+    0 => 'MBIMPhonebookNotInitialized',
+    1 => 'MBIMPhonebookInitialized',
+    );
 sub decode_phonebook {
     my ($cid, $info) = @_;
 
-    print "PHONEBOOK CID $cid decoding is not yet supported\n";
+    if ($cid == 1) { # MBIM_CID_PHONEBOOK_CONFIGURATION
+	my ($state, $total, $used, $maxnumber, $maxname)  = unpack("V5", $info);
+	print "  PhonebookState:\t$phonebookstate{$state}\n";
+	print "  TotalNbrOfEntries:\t$total\n";  
+	print "  UsedEntries:\t$used\n";
+	print "  MaxNumberLength:\t$maxnumber\n";  
+	print "  MaxNameLength:\t$maxname\n";
+    } else {
+	print "PHONEBOOK CID $cid decoding is not yet supported\n";
+    }
 }
 sub decode_stk {
     my ($cid, $info) = @_;
@@ -841,11 +855,28 @@ sub decode_auth {
     print "AUTH CID $cid decoding is not yet supported\n";
 }
 
+# Table 10‐77: MBIM_SMS_STORAGE_STATE 
+my %smsstoragestate = (
+    0 => 'MBIMSmsStorageNotInitialized',
+    1 => 'MBIMSmsStorageInitialized',
+    );
+
+# Table 10‐78: MBIM_SMS_FORMAT 
+my %smsformat = (
+    0 => 'MBIMSmsFormatPdu',
+    1 => 'MBIMSmsFormatCdma', 
+);
+
 sub decode_sms {
     my ($cid, $info) = @_;
 
     if ($cid == 1) { # MBIM_CID_SMS_CONFIGURATION  
-
+	my ($storagestate, $format, $max, $cdmasize, $off, $len)  = unpack("V6", $info);
+	print "  SmsStorageState:\t$smsstoragestate{$storagestate}\n";
+	print "  Format:\t$smsformat{$format}\n";
+	print "  MaxMessages:\t$max\n";
+	print "  CdmaShortMessageSize:\t$cdmasize\n";
+	print "  ScAddress:\t", &utf16_field($info, $off, $len), "\n";
     } else {
 	print "SMS CID $cid decoding is not yet supported\n";
     }
