@@ -1,13 +1,30 @@
 /*
-  CUSE example: Character device in Userspace
-  Copyright (C) 2008-2009  SUSE Linux Products GmbH
-  Copyright (C) 2008-2009  Tejun Heo <tj@kernel.org>
-
-  This program can be distributed under the terms of the GNU GPL.
-  See the file COPYING.
-
-  gcc -Wall cusexmp.c `pkg-config fuse --cflags --libs` -o cusexmp
-*/
+ * cuseqmi - an example of how to use CUSE to create a shim between
+ * the proprietary Qualcomm QMI SDK and the qmi_wwan driver in the
+ * mainline Linux kernel.
+ *
+ * Based on CUSE example: Character device in Userspace
+ *
+ *   Copyright (C) 2008-2009  SUSE Linux Products GmbH
+ *   Copyright (C) 2008-2009  Tejun Heo <tj@kernel.org>
+ *
+ * The Qualcomm QMI SDK interface expectations are pulled from the
+ * nicely rewritten Qualcomm Gobi 2000/3000 driver by Elly Jones
+ * <ellyjones@google.com>.  That driver is
+ *
+ *   Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ *
+ * The rest of the glue is
+ *
+ *   Copyright (C)  2013 Bjørn Mork <bjorn@mork.no>
+ *
+ * This program can be distributed under the terms of the GNU GPL.
+ * See the file COPYING.
+ *
+ * Building it:
+ *   gcc -Wall `pkg-config fuse --cflags --libs` cuseqmi.c -o cuseqmi
+ *
+ */
 
 #define FUSE_USE_VERSION 29
 
@@ -22,11 +39,11 @@
 
 #include "fioc.h"
 
-static void *cusexmp_buf;
-static size_t cusexmp_size;
+static void *cuseqmi_buf;
+static size_t cuseqmi_size;
 
 static const char *usage =
-"usage: cusexmp [options]\n"
+"usage: cuseqmi [options]\n"
 "\n"
 "options:\n"
 "    --help|-h             print this help message\n"
@@ -35,62 +52,62 @@ static const char *usage =
 "    --name=NAME|-n NAME   device name (mandatory)\n"
 "\n";
 
-static int cusexmp_resize(size_t new_size)
+static int cuseqmi_resize(size_t new_size)
 {
 	void *new_buf;
 
-	if (new_size == cusexmp_size)
+	if (new_size == cuseqmi_size)
 		return 0;
 
-	new_buf = realloc(cusexmp_buf, new_size);
+	new_buf = realloc(cuseqmi_buf, new_size);
 	if (!new_buf && new_size)
 		return -ENOMEM;
 
-	if (new_size > cusexmp_size)
-		memset(new_buf + cusexmp_size, 0, new_size - cusexmp_size);
+	if (new_size > cuseqmi_size)
+		memset(new_buf + cuseqmi_size, 0, new_size - cuseqmi_size);
 
-	cusexmp_buf = new_buf;
-	cusexmp_size = new_size;
+	cuseqmi_buf = new_buf;
+	cuseqmi_size = new_size;
 
 	return 0;
 }
 
-static int cusexmp_expand(size_t new_size)
+static int cuseqmi_expand(size_t new_size)
 {
-	if (new_size > cusexmp_size)
-		return cusexmp_resize(new_size);
+	if (new_size > cuseqmi_size)
+		return cuseqmi_resize(new_size);
 	return 0;
 }
 
-static void cusexmp_open(fuse_req_t req, struct fuse_file_info *fi)
+static void cuseqmi_open(fuse_req_t req, struct fuse_file_info *fi)
 {
 	fuse_reply_open(req, fi);
 }
 
-static void cusexmp_read(fuse_req_t req, size_t size, off_t off,
+static void cuseqmi_read(fuse_req_t req, size_t size, off_t off,
 			 struct fuse_file_info *fi)
 {
 	(void)fi;
 
-	if (off >= cusexmp_size)
-		off = cusexmp_size;
-	if (size > cusexmp_size - off)
-		size = cusexmp_size - off;
+	if (off >= cuseqmi_size)
+		off = cuseqmi_size;
+	if (size > cuseqmi_size - off)
+		size = cuseqmi_size - off;
 
-	fuse_reply_buf(req, cusexmp_buf + off, size);
+	fuse_reply_buf(req, cuseqmi_buf + off, size);
 }
 
-static void cusexmp_write(fuse_req_t req, const char *buf, size_t size,
+static void cuseqmi_write(fuse_req_t req, const char *buf, size_t size,
 			  off_t off, struct fuse_file_info *fi)
 {
 	(void)fi;
 
-	if (cusexmp_expand(off + size)) {
+	if (cuseqmi_expand(off + size)) {
 		fuse_reply_err(req, ENOMEM);
 		return;
 	}
 
-	memcpy(cusexmp_buf + off, buf, size);
+	memcpy(cuseqmi_buf + off, buf, size);
 	fuse_reply_write(req, size);
 }
 
@@ -139,37 +156,37 @@ static void fioc_do_rw(fuse_req_t req, void *addr, const void *in_buf,
 	}
 
 	/* we're all set */
-	cur_size = cusexmp_size;
+	cur_size = cuseqmi_size;
 	iov[0].iov_base = &cur_size;
 	iov[0].iov_len = sizeof(cur_size);
 
-	iov[1].iov_base = &cusexmp_size;
-	iov[1].iov_len = sizeof(cusexmp_size);
+	iov[1].iov_base = &cuseqmi_size;
+	iov[1].iov_len = sizeof(cuseqmi_size);
 
 	if (is_read) {
 		size_t off = arg->offset;
 		size_t size = arg->size;
 
-		if (off >= cusexmp_size)
-			off = cusexmp_size;
-		if (size > cusexmp_size - off)
-			size = cusexmp_size - off;
+		if (off >= cuseqmi_size)
+			off = cuseqmi_size;
+		if (size > cuseqmi_size - off)
+			size = cuseqmi_size - off;
 
-		iov[2].iov_base = cusexmp_buf + off;
+		iov[2].iov_base = cuseqmi_buf + off;
 		iov[2].iov_len = size;
 		fuse_reply_ioctl_iov(req, size, iov, 3);
 	} else {
-		if (cusexmp_expand(arg->offset + in_bufsz)) {
+		if (cuseqmi_expand(arg->offset + in_bufsz)) {
 			fuse_reply_err(req, ENOMEM);
 			return;
 		}
 
-		memcpy(cusexmp_buf + arg->offset, in_buf, in_bufsz);
+		memcpy(cuseqmi_buf + arg->offset, in_buf, in_bufsz);
 		fuse_reply_ioctl_iov(req, in_bufsz, iov, 2);
 	}
 }
 
-static void cusexmp_ioctl(fuse_req_t req, int cmd, void *arg,
+static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 			  struct fuse_file_info *fi, unsigned flags,
 			  const void *in_buf, size_t in_bufsz, size_t out_bufsz)
 {
@@ -189,8 +206,8 @@ static void cusexmp_ioctl(fuse_req_t req, int cmd, void *arg,
 
 			fuse_reply_ioctl_retry(req, NULL, 0, &iov, 1);
 		} else
-			fuse_reply_ioctl(req, 0, &cusexmp_size,
-					 sizeof(cusexmp_size));
+			fuse_reply_ioctl(req, 0, &cuseqmi_size,
+					 sizeof(cuseqmi_size));
 		break;
 
 	case FIOC_SET_SIZE:
@@ -199,7 +216,7 @@ static void cusexmp_ioctl(fuse_req_t req, int cmd, void *arg,
 
 			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
 		} else {
-			cusexmp_resize(*(size_t *)in_buf);
+			cuseqmi_resize(*(size_t *)in_buf);
 			fuse_reply_ioctl(req, 0, NULL, 0);
 		}
 		break;
@@ -215,31 +232,31 @@ static void cusexmp_ioctl(fuse_req_t req, int cmd, void *arg,
 	}
 }
 
-struct cusexmp_param {
+struct cuseqmi_param {
 	unsigned		major;
 	unsigned		minor;
 	char			*dev_name;
 	int			is_help;
 };
 
-#define CUSEXMP_OPT(t, p) { t, offsetof(struct cusexmp_param, p), 1 }
+#define CUSEQMI_OPT(t, p) { t, offsetof(struct cuseqmi_param, p), 1 }
 
-static const struct fuse_opt cusexmp_opts[] = {
-	CUSEXMP_OPT("-M %u",		major),
-	CUSEXMP_OPT("--maj=%u",		major),
-	CUSEXMP_OPT("-m %u",		minor),
-	CUSEXMP_OPT("--min=%u",		minor),
-	CUSEXMP_OPT("-n %s",		dev_name),
-	CUSEXMP_OPT("--name=%s",	dev_name),
+static const struct fuse_opt cuseqmi_opts[] = {
+	CUSEQMI_OPT("-M %u",		major),
+	CUSEQMI_OPT("--maj=%u",		major),
+	CUSEQMI_OPT("-m %u",		minor),
+	CUSEQMI_OPT("--min=%u",		minor),
+	CUSEQMI_OPT("-n %s",		dev_name),
+	CUSEQMI_OPT("--name=%s",	dev_name),
 	FUSE_OPT_KEY("-h",		0),
 	FUSE_OPT_KEY("--help",		0),
 	FUSE_OPT_END
 };
 
-static int cusexmp_process_arg(void *data, const char *arg, int key,
+static int cuseqmi_process_arg(void *data, const char *arg, int key,
 			       struct fuse_args *outargs)
 {
-	struct cusexmp_param *param = data;
+	struct cuseqmi_param *param = data;
 
 	(void)outargs;
 	(void)arg;
@@ -254,22 +271,22 @@ static int cusexmp_process_arg(void *data, const char *arg, int key,
 	}
 }
 
-static const struct cuse_lowlevel_ops cusexmp_clop = {
-	.open		= cusexmp_open,
-	.read		= cusexmp_read,
-	.write		= cusexmp_write,
-	.ioctl		= cusexmp_ioctl,
+static const struct cuse_lowlevel_ops cuseqmi_clop = {
+	.open		= cuseqmi_open,
+	.read		= cuseqmi_read,
+	.write		= cuseqmi_write,
+	.ioctl		= cuseqmi_ioctl,
 };
 
 int main(int argc, char **argv)
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct cusexmp_param param = { 0, 0, NULL, 0 };
+	struct cuseqmi_param param = { 0, 0, NULL, 0 };
 	char dev_name[128] = "DEVNAME=";
 	const char *dev_info_argv[] = { dev_name };
 	struct cuse_info ci;
 
-	if (fuse_opt_parse(&args, &param, cusexmp_opts, cusexmp_process_arg)) {
+	if (fuse_opt_parse(&args, &param, cuseqmi_opts, cuseqmi_process_arg)) {
 		printf("failed to parse option\n");
 		return 1;
 	}
@@ -289,6 +306,6 @@ int main(int argc, char **argv)
 	ci.dev_info_argv = dev_info_argv;
 	ci.flags = CUSE_UNRESTRICTED_IOCTL;
 
-	return cuse_lowlevel_main(args.argc, args.argv, &ci, &cusexmp_clop,
+	return cuse_lowlevel_main(args.argc, args.argv, &ci, &cuseqmi_clop,
 				  NULL);
 }
