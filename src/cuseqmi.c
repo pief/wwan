@@ -24,6 +24,16 @@
  * Building it:
  *   gcc -Wall `pkg-config fuse --cflags --libs` cuseqmi.c -o cuseqmi
  *
+ *
+ 
+
+TODO: 
+
+- allow specifying a single QMI device, automatically creating
+  the dummy usbX interface and /dev/qcqmiX
+- open /dev/cdc-wdmY on startup, verify QMI, start reader thread
+- demux all read data into a list of connected clients
+- enforce the client registrations ioctls
  */
 
 #define FUSE_USE_VERSION 29
@@ -37,8 +47,6 @@
 #include <unistd.h>
 #include <errno.h>
 
-#include "fioc.h"
-
 static void *cuseqmi_buf;
 static size_t cuseqmi_size;
 
@@ -51,33 +59,6 @@ static const char *usage =
 "    --min=MIN|-m MIN      device minor number\n"
 "    --name=NAME|-n NAME   device name (mandatory)\n"
 "\n";
-
-static int cuseqmi_resize(size_t new_size)
-{
-	void *new_buf;
-
-	if (new_size == cuseqmi_size)
-		return 0;
-
-	new_buf = realloc(cuseqmi_buf, new_size);
-	if (!new_buf && new_size)
-		return -ENOMEM;
-
-	if (new_size > cuseqmi_size)
-		memset(new_buf + cuseqmi_size, 0, new_size - cuseqmi_size);
-
-	cuseqmi_buf = new_buf;
-	cuseqmi_size = new_size;
-
-	return 0;
-}
-
-static int cuseqmi_expand(size_t new_size)
-{
-	if (new_size > cuseqmi_size)
-		return cuseqmi_resize(new_size);
-	return 0;
-}
 
 static void cuseqmi_open(fuse_req_t req, struct fuse_file_info *fi)
 {
@@ -102,97 +83,17 @@ static void cuseqmi_write(fuse_req_t req, const char *buf, size_t size,
 {
 	(void)fi;
 
-	if (cuseqmi_expand(off + size)) {
-		fuse_reply_err(req, ENOMEM);
-		return;
-	}
-
-	memcpy(cuseqmi_buf + off, buf, size);
 	fuse_reply_write(req, size);
 }
 
-static void fioc_do_rw(fuse_req_t req, void *addr, const void *in_buf,
-		       size_t in_bufsz, size_t out_bufsz, int is_read)
-{
-	const struct fioc_rw_arg *arg;
-	struct iovec in_iov[2], out_iov[3], iov[3];
-	size_t cur_size;
-
-	/* read in arg */
-	in_iov[0].iov_base = addr;
-	in_iov[0].iov_len = sizeof(*arg);
-	if (!in_bufsz) {
-		fuse_reply_ioctl_retry(req, in_iov, 1, NULL, 0);
-		return;
-	}
-	arg = in_buf;
-	in_buf += sizeof(*arg);
-	in_bufsz -= sizeof(*arg);
-
-	/* prepare size outputs */
-	out_iov[0].iov_base =
-		addr + (unsigned long)&(((struct fioc_rw_arg *)0)->prev_size);
-	out_iov[0].iov_len = sizeof(arg->prev_size);
-
-	out_iov[1].iov_base =
-		addr + (unsigned long)&(((struct fioc_rw_arg *)0)->new_size);
-	out_iov[1].iov_len = sizeof(arg->new_size);
-
-	/* prepare client buf */
-	if (is_read) {
-		out_iov[2].iov_base = arg->buf;
-		out_iov[2].iov_len = arg->size;
-		if (!out_bufsz) {
-			fuse_reply_ioctl_retry(req, in_iov, 1, out_iov, 3);
-			return;
-		}
-	} else {
-		in_iov[1].iov_base = arg->buf;
-		in_iov[1].iov_len = arg->size;
-		if (arg->size && !in_bufsz) {
-			fuse_reply_ioctl_retry(req, in_iov, 2, out_iov, 2);
-			return;
-		}
-	}
-
-	/* we're all set */
-	cur_size = cuseqmi_size;
-	iov[0].iov_base = &cur_size;
-	iov[0].iov_len = sizeof(cur_size);
-
-	iov[1].iov_base = &cuseqmi_size;
-	iov[1].iov_len = sizeof(cuseqmi_size);
-
-	if (is_read) {
-		size_t off = arg->offset;
-		size_t size = arg->size;
-
-		if (off >= cuseqmi_size)
-			off = cuseqmi_size;
-		if (size > cuseqmi_size - off)
-			size = cuseqmi_size - off;
-
-		iov[2].iov_base = cuseqmi_buf + off;
-		iov[2].iov_len = size;
-		fuse_reply_ioctl_iov(req, size, iov, 3);
-	} else {
-		if (cuseqmi_expand(arg->offset + in_bufsz)) {
-			fuse_reply_err(req, ENOMEM);
-			return;
-		}
-
-		memcpy(cuseqmi_buf + arg->offset, in_buf, in_bufsz);
-		fuse_reply_ioctl_iov(req, in_bufsz, iov, 2);
-	}
-}
 
 static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 			  struct fuse_file_info *fi, unsigned flags,
 			  const void *in_buf, size_t in_bufsz, size_t out_bufsz)
 {
-	int is_read = 0;
-
 	(void)fi;
+
+	fprintf(stderr, "%s: here\n", __func__);
 
 	if (flags & FUSE_IOCTL_COMPAT) {
 		fuse_reply_err(req, ENOSYS);
@@ -200,32 +101,6 @@ static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 	}
 
 	switch (cmd) {
-	case FIOC_GET_SIZE:
-		if (!out_bufsz) {
-			struct iovec iov = { arg, sizeof(size_t) };
-
-			fuse_reply_ioctl_retry(req, NULL, 0, &iov, 1);
-		} else
-			fuse_reply_ioctl(req, 0, &cuseqmi_size,
-					 sizeof(cuseqmi_size));
-		break;
-
-	case FIOC_SET_SIZE:
-		if (!in_bufsz) {
-			struct iovec iov = { arg, sizeof(size_t) };
-
-			fuse_reply_ioctl_retry(req, &iov, 1, NULL, 0);
-		} else {
-			cuseqmi_resize(*(size_t *)in_buf);
-			fuse_reply_ioctl(req, 0, NULL, 0);
-		}
-		break;
-
-	case FIOC_READ:
-		is_read = 1;
-	case FIOC_WRITE:
-		fioc_do_rw(req, arg, in_buf, in_bufsz, out_bufsz, is_read);
-		break;
 
 	default:
 		fuse_reply_err(req, EINVAL);
