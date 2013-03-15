@@ -47,10 +47,9 @@ TODO:
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <linux/types.h>
 
-
-/* -- from qcqmi.c --- */
 
 #define IOCTL_QMI_GET_SERVICE_FILE      (0x8BE0 + 1)
 #define IOCTL_QMI_GET_DEVICE_VIDPID     (0x8BE0 + 2)
@@ -80,16 +79,13 @@ struct qmictl {
 	__u16 tlvsize;
 } __attribute__((__packed__));
 
-/* -- eof from qcqmi.c --- */
-
-
 
 /* global data */
 
 /* /dev/cdc-wdmX: */
+static int fin = 0;
 static int fd;                               /* handle */
 static int bufsz = 4096;                     /* message size */
-static char filename[] = "/dev/cdc-wdm0";    /* filename */
 static pthread_mutex_t wr_mutex = PTHREAD_MUTEX_INITIALIZER; /* write lock */
 static __u16 vid = 0x1199;
 static __u16 pid = 0x68a2;  /* USB vid:pid */
@@ -113,10 +109,9 @@ struct qclient {
 	struct qclient *next;
 };
 
-/* sorted (by cid) list of open clients */
+/* unsorted list of open clients */
 static struct qclient *clients = NULL;
 static pthread_mutex_t cl_mutex = PTHREAD_MUTEX_INITIALIZER; /* client list lock */
-
 
 struct qclient *new_client(int cid)
 {
@@ -167,10 +162,6 @@ void destroy_client(struct qclient *client)
 	pthread_cond_destroy(&client->ready);
 	free(client);
 }
-
-
-
-/* format and send qmi */
 
 /* predefined QMI_CTL get versions message */
 static char get_ver_msg[] = { 0x01, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x21, 0x00, 0x04, 0x00, 0x01, 0x01, 0x00, 0xff };
@@ -468,7 +459,6 @@ static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 {
 	struct qclient *client = (void *)fi->fh;
 	int ret = 0;
-	unsigned int vidpid = vid << 16 | pid;
 
 	fprintf(stderr, "%s: cmd=%#010x, arg=%p\n", __func__, cmd, arg);
 
@@ -522,6 +512,7 @@ static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
                         struct iovec iov = { arg, sizeof(__u32) };
                         fuse_reply_ioctl_retry(req, NULL, 0, &iov, 1);
                 } else {
+			__u32 vidpid = vid << 16 | pid;
 			DBG("copying vid:pid to userspace\n");
                         fuse_reply_ioctl(req, 0,  &vidpid, sizeof(__u32));
 		}
@@ -551,6 +542,7 @@ struct cuseqmi_param {
 	unsigned		major;
 	unsigned		minor;
 	char			*dev_name;
+	char			*qmi_name;
 	int			is_help;
 };
 
@@ -563,6 +555,8 @@ static const struct fuse_opt cuseqmi_opts[] = {
 	CUSEQMI_OPT("--min=%u",		minor),
 	CUSEQMI_OPT("-n %s",		dev_name),
 	CUSEQMI_OPT("--name=%s",	dev_name),
+	CUSEQMI_OPT("-q %s",		qmi_name),
+	CUSEQMI_OPT("--qmidev=%s",	qmi_name),
 	FUSE_OPT_KEY("-h",		0),
 	FUSE_OPT_KEY("--help",		0),
 	FUSE_OPT_END
@@ -585,8 +579,6 @@ static int cuseqmi_process_arg(void *data, const char *arg, int key,
 		return 1;
 	}
 }
-
-
 
 /* add a copy of the complete QMUX in buf to client's read queue */
 static void add_msg_to_client(struct qclient *client, char *buf, int len)
@@ -644,7 +636,6 @@ static void copy_msg_to_clients(char *buf, int len)
 		}
 	}
 
-
 	/* cannot accept than anyone modifies the list while we're scanning it */
 	pthread_mutex_lock(&cl_mutex);
 	for (p = clients; p; p= p->next)
@@ -653,29 +644,44 @@ static void copy_msg_to_clients(char *buf, int len)
 	pthread_mutex_unlock(&cl_mutex);
 }
 
-
 /* ==== reader thread ===== */
+
 void *readcdcwdm(void *tmp)
 {
-   int n;
-   char *buf = malloc(bufsz);
+	int n, rv;
+	fd_set rfds;
+	struct fuse_session **se = tmp;
+	char *buf = malloc(bufsz);
 
-   printf("Hello World! It's me\n");
-   do {
-	   n = read(fd, buf, bufsz);
-	   printf("%s: read %d bytes\n", __func__, n);
+	if (!buf)
+		goto err;
 
-	   /* find matching client(s) and link a copy into the rq */
-	   if (n > 0)
-		   copy_msg_to_clients(buf, n);
-
-   } while (n >= 0);
-   free(buf);
-   perror("reader exiting:");
-   pthread_exit(NULL);
+	printf("Hello World! It's me\n");
+	while (!fin) {
+		FD_ZERO(&rfds);
+		FD_SET(fd, &rfds);
+		rv = select(1, &rfds, NULL, NULL, NULL);
+		if (rv == -1) {
+			perror("select()");
+			fin = 1;
+		} else if (FD_ISSET(fd, &rfds)) {
+			n = read(fd, buf, bufsz);
+			printf("%s: read %d bytes\n", __func__, n);
+			
+			/* find matching client(s) and link a copy into the rq */
+			if (n > 0)
+				copy_msg_to_clients(buf, n);
+		} else
+			fin = 1;
+	}
+	free(buf);
+	perror("reader exiting:");
+	
+	/* terminate main loop */
+	fuse_session_exit(*se);
+err:
+	pthread_exit(NULL);
 }
-
-
 
 static const struct cuse_lowlevel_ops cuseqmi_clop = {
 	.open		= cuseqmi_open,
@@ -693,25 +699,27 @@ int main(int argc, char **argv)
 	const char *dev_info_argv[] = { dev_name };
 	struct cuse_info ci;
 	pthread_t readthread;
-	pthread_attr_t attr;
-	void *status;
 	int rc;
 
+        struct fuse_session *se;
+        int multithreaded;
+ 
+
 	if (fuse_opt_parse(&args, &param, cuseqmi_opts, cuseqmi_process_arg)) {
-		printf("failed to parse option\n");
-		return 1;
+		fprintf(stderr, "failed to parse option\n");
+		return -1;
 	}
 
 	if (!param.is_help) {
-		if (!param.dev_name) {
+		if (!param.dev_name || !param.qmi_name) {
 			fprintf(stderr, "Error: device name missing\n");
-			return 1;
+			return -1;
 		}
 		strncat(dev_name, param.dev_name, sizeof(dev_name) - 9);
 	}
 
 	/* open QMI device */
-	fd = open(filename, O_RDWR);
+	fd = open(param.qmi_name, O_RDWR | O_NONBLOCK);
 	if (fd < 0) {
 		perror("Error in open");
 		return -1;
@@ -722,19 +730,7 @@ int main(int argc, char **argv)
 	 */
 
 
-	/* create reader thread */
-	pthread_attr_init(&attr);
-	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-	printf("In main: creating reader thread\n");
-	rc = pthread_create(&readthread, &attr, readcdcwdm, NULL);
-	if (rc) {
-		printf("ERROR; return code from pthread_create() is %d\n", rc);
-		return -1;
-	}
-	pthread_attr_destroy(&attr);
-
 	/* run QMI_CTL get version, serial numbers etc */
-
 
 	/* create qcqmi device */
 	memset(&ci, 0, sizeof(ci));
@@ -744,18 +740,32 @@ int main(int argc, char **argv)
 	ci.dev_info_argv = dev_info_argv;
 	ci.flags = CUSE_UNRESTRICTED_IOCTL;
 
+/* expanding this:
 	rc = cuse_lowlevel_main(args.argc, args.argv, &ci, &cuseqmi_clop,  NULL);
+   to allow us to forcefully exit the loop
+*/
 
+        se = cuse_lowlevel_setup(args.argc, args.argv, &ci, &cuseqmi_clop, &multithreaded, NULL);
+        if (se == NULL)
+                return -1;
+
+	/* create reader thread */
+	rc = pthread_create(&readthread, NULL, readcdcwdm, &se);
+	if (rc) {
+		printf("ERROR; return code from pthread_create() is %d\n", rc);
+		return -1;
+	}
+
+	if (multithreaded)
+                rc = fuse_session_loop_mt(se);
+        else
+                rc = fuse_session_loop(se);
+
+        cuse_lowlevel_teardown(se);
 	printf("cuse_lowlevel_main returned %d\n", rc);
-	
-	/* close file and wait for reader to exit */
-	close(fd);
-
 	pthread_cancel(readthread);
-	if (pthread_join(readthread, &status) < 0)
-		perror("pthread_join:");
-	else
-		printf("status=%ld\n", (long)status);
-
+	fin = 1;
+	close(fd);
+	pthread_exit(NULL);
 	return rc;
 }
