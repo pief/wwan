@@ -24,4 +24,4 @@ qcqmifs: qcqmifs.c
 	$(CC) $(CFLAGS) $(CFLAGS_FUSE) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(LDLIBS_FUSE)
 
 cuseqmi: cuseqmi.c
-	$(CC) $(CFLAGS) $(CFLAGS_FUSE) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(LDLIBS_FUSE)
+	$(CC) $(CFLAGS) $(CFLAGS_FUSE) $(LDFLAGS) -lpthread -o $@ $^ $(LDLIBS) $(LDLIBS_FUSE)
