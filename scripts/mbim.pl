@@ -9,6 +9,10 @@ use Getopt::Long;
 use Encode;
 use Devel::SimpleTrace;
 use UUID::Tiny ':std';
+use Net::IP;
+
+# default, will be overridden by ioctl if supported
+my $maxctrl = 4096;
 
 # per interface config
 my %pin; $pin{1} = &strip_quotes($ENV{'IF_WWAN_PIN'}) if $ENV{'IF_WWAN_PIN'};
@@ -341,7 +345,7 @@ sub push_fragment_header {
 # MBIM_OPEN_MSG
 sub mk_open_msg {
     my $buf = &init_msg_header(1); # MBIM_OPEN_MSG  
-    $buf = &_push($buf, "V", 4096); # MaxControlTransfer 
+    $buf = &_push($buf, "V", $maxctrl); # MaxControlTransfer 
 
     if ($debug) {
 	my $n = length($buf);
@@ -525,7 +529,8 @@ sub decode_mbim_context {
 
 
 sub mk_cid_radio_state {
-    return &mk_command_msg('BASIC_CONNECT', 3, 0, '');
+    my $on = shift;
+    return $on ? &mk_command_msg('BASIC_CONNECT', 3, 1, pack("V", 1)) : &mk_command_msg('BASIC_CONNECT', 3, 0, '');
 }
 
 sub mk_cid_pin {
@@ -543,6 +548,33 @@ sub mk_cid_pin {
 
     return &mk_command_msg('BASIC_CONNECT', 4, 1, $data);
 }
+
+# Table 10‐7: MBIM_DEVICE_TYPE 
+my %devicetype = (
+    1 => 'MBIMDeviceTypeEmbedded',
+    2 => 'MBIMDeviceTypeRemovable',
+    3 => 'MBIMDeviceTypeRemote',
+);
+
+# Table 10‐8: MBIM_CELLULAR_CLASS 
+my %cellclass = (
+    1 => 'MBIMCellularClassGsm',
+    2 => 'MBIMCellularClassCdma',
+    );
+    
+# Table 10‐9: MBIM_VOICE_CLASS 
+my %voiceclass = (
+    0 => 'MBIMVoiceClassUnknown',
+    1 => 'MBIMVoiceClassNoVoice',
+    2 => 'MBIMVoiceClassSeparateVoiceData',
+    3 => 'MBIMVoiceClassSimultaneousVoiceData',
+    );
+
+# Table 10‐10: MBIM_SIM_CLASS 
+my %simclass = (
+    1 => 'MBIMSimClassSimLogical',
+    2 => 'MBIMSimClassSimRemovable',
+    );
 
 # Table 10‐11: MBIM_DATA_CLASS 
 my %dataclass = (
@@ -565,13 +597,38 @@ my %dataclass = (
 	0x80000000 => 'MBIMDataClassCustom',
     );
 
-sub flags_to_dataclass {
-    my $flags = shift;
-    my @class =  map { my $x = $dataclass{$_}; $x =~ s/MBIMDataClass//; $x } grep { $flags & $_ } sort { $a <=> $b } keys %dataclass;
+# Table 10‐12: MBIM_SMS_CAPS 
+my %smscaps = (
+    1 => 'MBIMSmsCapsPduReceive',
+    2 => 'MBIMSmsCapsPduSend',
+    4 => 'MBIMSmsCapsTextReceive',
+    8 => 'MBIMSmsCapsTextSend',
+    );
 
-    return join(', ', @class);
+# Table 10‐13: MBIM_CTRL_CAPS 
+my %ctrlcaps = (
+    0x01 => 'MBIMCtrlCapsRegManual',
+    0x02 => 'MBIMCtrlCapsHwRadioSwitch',
+    0x04 => 'MBIMCtrlCapsCdmaMobileIp',
+    0x08 => 'MBIMCtrlCapsCdmaSimpleIp',
+    0x10 => 'MBIMCtrlCapsMultiCarrier',
+);
+
+sub value_to_class {
+    my $value = shift;
+    my $rh_class = shift;
+    my $ret = $rh_class->{$value} || 'Unknown';
+    $ret =~ s/MBIM[A-Z][a-z]+(?:Class|Caps|Type)//;
+    return  $ret;
 }
 
+sub flags_to_class {
+    my $flags = shift;
+    my $rh_class = shift;
+    my @class =  map { my $x = $rh_class->{$_}; $x =~ s/MBIM[A-Z][a-z]+(?:Class|Caps|Type)//; $x } grep { $flags & $_ } sort { $a <=> $b } keys %$rh_class;
+
+    return join(', ', @class) || 'None';
+}
 
 # Table 10‐16: MBIM_SUBSCRIBER_READY_STATE 
 my %readystate = (
@@ -582,6 +639,12 @@ my %readystate = (
 	4 => 'MBIMSubscriberReadyStateFailure',
 	5 => 'MBIMSubscriberReadyStateNotActivated',
 	6 => 'MBIMSubscriberReadyStateDeviceLocked',
+    );
+
+# Table 10‐17: MBIM_UNIQUE_ID_FLAGS 
+my %readyinfo = (
+    0 => 'MBIMReadyInfoFlagsNone',
+    1 => 'MBIMReadyInfoFlagsProtectUniqueID',
     );
 
 # Table 10‐24: MBIM_PIN_TYPE 
@@ -695,8 +758,8 @@ sub decode_registration_state {
     print "    NwError:\t$nwerr ($nwerror{$nwerr})\n";
     print "    RegisterState:\t$state ($regstate{$state})\n";
     print "    RegisterMode:\t$mode ($regmode{$mode})\n";
-    printf "    AvailableDataClasses:\t0x%08x %s\n", $availclass, &flags_to_dataclass($availclass);
-    printf "    CurrentCellularClass:\t0x%08x %s\n", $currclass, &flags_to_dataclass($currclass);
+    printf "    AvailableDataClasses:\t0x%08x %s\n", $availclass, &flags_to_class($availclass, \%dataclass);
+    printf "    CurrentCellularClass:\t0x%08x %s\n", $currclass, &value_to_class($currclass, \%dataclass);
     print "    ProviderId:\t", &utf16_field($info, $idoff, $idsize), "\n";
     print "    ProviderName:\t", &utf16_field($info, $nameoff, $namesize), "\n";
     print "    RoamingtText:\t", &utf16_field($info, $roamtxt, $roamlen), "\n";
@@ -730,18 +793,53 @@ sub decode_device_service {
     }
 }
 
+my %ipcfg = (
+    0x01 => 'address',
+    0x02 => 'gateway',
+    0x04 => 'dns',
+    0x08 => 'mtu',
+);
+
+# Table 10‐101: MBIM_IPV4_ADDRESS 
+sub ipv4_address {
+    my $info = shift;
+    return join('.', unpack("C4", $info));
+}
+    
+# Table 10‐103: MBIM_IPV6_ADDRESS 
+sub ipv6_address {
+    my $info = shift;
+    my $x = sprintf "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", unpack("C16", $info);
+    my $ip = new Net::IP ($x);
+    return $ip->short();
+}
+
+# Table 10‐102: MBIM_IPV4_ELEMENT 
+sub ipv4_element {
+    my $info = shift;
+    my $pfxlen = unpack("V", $info);
+    return &ipv4_address(substr($info, 4, 4)) . "/$pfxlen";
+}
+
+# Table 10‐104: MBIM_IPV6_ELEMENT 
+sub ipv6_element {
+    my $info = shift;
+    my $pfxlen = unpack("V", $info);
+    return &ipv6_address(substr($info, 4, 16)) . "/$pfxlen";
+}
+
 sub decode_basic_connect {
     my ($cid, $info) = @_;
 
     if ($cid == 1) { # MBIM_CID_DEVICE_CAPS
 	my ($type, $class, $voiceclass, $simclass, $dataclass, $smscaps, $ctrlcaps, $maxsessions, $custoff, $custlen, $idoff, $idlen, $fwoff, $fwlen, $hwoff, $hwlen) = unpack("V16", $info);
-	print "  DeviceType:\t$type\n";
-	printf "  CellularClass:\t0x%08x\n", $class;
-	printf "  VoiceClass:\t0x%08x\n", $voiceclass;
-	printf "  SIMClass:\t0x%08x\n", $simclass;
-	printf "  DataClass:\t0x%08x %s\n", $dataclass, &flags_to_dataclass($dataclass);
-	printf "  SMSCaps:\t0x%08x\n", $smscaps;
-	printf "  ControlCaps:\t0x%08x\n", $ctrlcaps;
+	print "  DeviceType:\t", &value_to_class($type, \%devicetype), " ($type)\n";
+	printf "  CellularClass:\t0x%08x %s\n", $class, &value_to_class($class, \%cellclass);
+	printf "  VoiceClass:\t0x%08x %s\n", $voiceclass, &value_to_class($voiceclass, \%voiceclass);
+	printf "  SIMClass:\t0x%08x %s\n", $simclass, &value_to_class($simclass, \%simclass);
+	printf "  DataClass:\t0x%08x %s\n", $dataclass, &flags_to_class($dataclass, \%dataclass);
+	printf "  SMSCaps:\t0x%08x %s\n", $smscaps, &flags_to_class($smscaps, \%smscaps);
+	printf "  ControlCaps:\t0x%08x %s\n", $ctrlcaps, &flags_to_class($ctrlcaps, \%ctrlcaps);
 	print "  MaxSessions:\t$maxsessions\n";
 	print "  CustomDataClass:\t", &utf16_field($info, $custoff, $custlen), "\n";
 	print "  DeviceId:\t", &utf16_field($info, $idoff, $idlen), "\n";
@@ -752,7 +850,7 @@ sub decode_basic_connect {
 	print "  ReadyState:\t$readystate{$state} ($state)\n";
 	print "  SubscriberId:\t", &utf16_field($info, $idoff, $idlen), "\n";
 	print "  SimIccId:\t", &utf16_field($info, $iccidoff, $iccidlen), "\n";
-	printf "  ReadyInfo:\t0x%08x\n", $flags;
+	print "  ReadyInfo:\t$readyinfo{$flags} ($flags)\n";
 	print "  ElementCount (EC):\t$ec\n";
 	for (my $i = 0; $i < $ec; $i++) {
 	    my ($off, $len) = unpack("VV", substr($info, 28 + 8 * $i, 8));
@@ -774,7 +872,7 @@ sub decode_basic_connect {
 	my ($nwerr, $state, $class, $upspeed, $downspeed) = unpack("V3Q<2", $info);
 	print "  NwError:\t$nwerror{$nwerr} ($nwerr)\n";
 	print "  PacketServiceState:\t$packetstate{$state} ($state)\n";
-	printf "  HighestAvailableDataClass:\t0x%08x\n", $class;
+	printf "  HighestAvailableDataClass:\t0x%08x %s\n", $class, &flags_to_class($class, \%dataclass);
 	print "  UplinkSpeed:\t$upspeed\n";
 	print "  DownlinkSpeed:\t$downspeed\n";
     } elsif ($cid == 11) { # MBIM_CID_SIGNAL_STATE
@@ -803,8 +901,31 @@ sub decode_basic_connect {
 	    &decode_mbim_context(substr($info, $off, $len));
 	}
 
-    } elsif ($cid == 13) { # MBIM_CID_IP_CONFIGURATION  
-
+    } elsif ($cid == 15) { # MBIM_CID_IP_CONFIGURATION  
+	my ($id, $ipv4cfg, $ipv6cfg, $ipv4c, $ipv4o, $ipv6c, $ipv6o, $ipv4gw, $ipv6gw, $ipv4dnsc, $ipv4dnso, $ipv6dnsc, $ipv6dnso, $ipv4mtu, $ipv6mtu)  = unpack("V15", $info);
+	print "  SessionId:\t$id\n";
+	printf "  IPv4ConfigurationAvailable:\t0x%08x %s\n", $ipv4cfg, &flags_to_class($ipv4cfg, \%ipcfg);
+	printf "  IPv6ConfigurationAvailable:\t0x%08x %s\n", $ipv6cfg, &flags_to_class($ipv6cfg, \%ipcfg);
+	print "  IPv4AddressCount:\t$ipv4c\n";
+	for (my $i = 0; $i < $ipv4c; $i++) {
+	    print "    ", &ipv4_element(substr($info, $ipv4o + $i * 8, 8)), "\n";
+	}
+	print "  IPv6AddressCount:\t$ipv6c\n";
+	for (my $i = 0; $i < $ipv6c; $i++) {
+	    print "    ", &ipv6_element(substr($info, $ipv6o + $i * 20, 20)), "\n";
+	}
+	print "  IPv4Gateway:\t", &ipv4_address(substr($info, $ipv4gw, 4)), "\n";
+	print "  IPv6Gateway:\t", &ipv6_address(substr($info, $ipv6gw, 16)), "\n";
+	print "  IPv4DnsServerCount:\t$ipv4dnsc\n";
+	for (my $i = 0; $i < $ipv4dnsc; $i++) {
+	    print "    ", &ipv4_address(substr($info, $ipv4dnso + $i * 4, 4)), "\n";
+	}
+	print "  IPv6DnsServerCount:\t$ipv6dnsc\n";
+	for (my $i = 0; $i < $ipv6dnsc; $i++) {
+	    print "    ", &ipv6_address(substr($info, $ipv6dnso + $i * 16, 16)), "\n";
+	}
+	print "  IPv4Mtu:\t$ipv4mtu\n";
+	print "  IPv6Mtu:\t$ipv6mtu\n";
     } elsif ($cid == 16) { # MBIM_CID_DEVICE_SERVICES
 	my ($dsc, $max) = unpack("VV", $info);
 	print "  DeviceServicesCount (DSC):\t$dsc\n";
@@ -816,6 +937,8 @@ sub decode_basic_connect {
 
     } else {
 	print "CID $cid decoding is not yet supported\n";
+	print join(' ', map { sprintf "%02x", $_ } unpack("C*", $info)), "\n";
+
     }
 }
 
@@ -865,7 +988,282 @@ my %smsstoragestate = (
 my %smsformat = (
     0 => 'MBIMSmsFormatPdu',
     1 => 'MBIMSmsFormatCdma', 
+    );
+
+# Table 10‐85: MBIM_SMS_MESSAGE_STATUS 
+my %smsmsgstatus = (
+    0 => 'MBIMSmsStatusNew',
+    1 => 'MBIMSmsStatusOld',
+    2 => 'MBIMSmsStatusDraft',
+    3 => 'MBIMSmsStatusSent',
+    );
+
+
+# Table 10‐98: MBIM_SMS_STATUS_FLAGS 
+my %smsflags = (
+    0 => 'MBIM_SMS_FLAG_NONE',
+    1 => 'MBIM_SMS_FLAG_MESSAGE_STORE_FULL',
+    2 => 'MBIM_SMS_FLAG_NEW_MESSAGE',
+    );
+
+
+
+
+
+
+#################
+#Stolen from http://nah6.com/~itsme/cvs-xdadevtools/perlutils/decodesms.pl
+
+# todo: add support for decoding cell broadcast message pdu's  -> 23.041
+
+# this script decodes raw smsses
+
+# 27.005 - Use of Data Terminal Equipment - Data Circuit terminating Equipment (DTE-DCE) interface for Short Message Service (SMS) and Cell Broadcast Service (CBS)
+#    describes the at-commands involved in sending/receiving smsses
+
+# 23.040 - Technical realization of Short Message Service (SMS)
+#    describes the encoding of smsses
+
+# 23.038 - Technical realization of Short Message Service (SMS)
+#    describes the data coding schemes
+#
+#  ms = mobilestation
+#  SC = servicecenter
+my @pdutypes= (
+    # ms->SC       |   SC->ms
+ [ 'deliver-report', 'deliver' ],  # 0
+ [ 'submit',   'submit-report' ],  # 1
+ [ 'command',  'status-report' ],  # 2
+ [ 'unknown-out', 'unknown-in' ],  # 3
 );
+#  RP = Reply-Path
+#   H = UDHI - userdata header indicator
+# SRI = status report indicator
+# SRR = status report requested
+# MMS = moremessages
+#  RD = reject dups
+# VPF = validity period format
+
+#  MR = message reference
+#  OA = origination address
+#  DA = destination address
+#  VP = validity period
+# PID = protocol id
+# DCS = data coding scheme
+#SCTS = sc timestamp
+#  DT = discharge time
+# UDL = userdata lenght
+#  UD = user data
+# FCS = failure cause -- encoded as 'i'
+#  PI = parameter indicator : bitmask
+#  CT = command type
+#  MN = message number
+# CDL = commandata length
+#  CD = command data
+my %typeinfo= (                                           # 7  6 5    4 3 2   1 0 |
+'deliver-report'=> ",FCS,PI,PID,DCS,UDL,UD,",             # -  H -    -   -   MTI | FCS, PI, PID, DCS, UDL, UD
+'deliver'=>        ",OA,PID,DCS,SCTS,UDL,UD,",            # RP H SRI  -   MMS MTI | OA, PID, DCS, SCTS, UDL, UD
+'submit'=>         ",MR,DA,PID,DCS,VP,UDL,UD,",           # RP H SRR  VPF RD  MTI | MR, DA, PID, DCS, VP, UDL, UD
+'submit-report'=>  ",FCS,PI,SCTS,PID,DCS,UDL,UD,",        # -  H -    -   -   MTI | FCS, PI, SCTS, PID, DCS, UDL, UD
+'status-report'=>  ",MR,RA,SCTS,DT,ST,PI,PID,DCS,UDL,UD,",# -  H SRQ  -   MMS MTI | MR, RA, SCTS, DT, ST, PI, PID, DCS, UDL, UD
+'command'=>        ",MR,PID,CT,MN,DA,CDL,CD,",            # -  H SRR  -   -   MTI | MR, PID, CT, MN, DA, CDL, CD
+);
+sub hasfield {
+    my ($pdutype, $field)= @_;
+    return $typeinfo{$pdutype} =~ /,$field,/i;
+}
+my @numtypes= ( 'unknown', 'international', 'national', 'network', 'subscriber', 'alpha', 'abbrev', 'reserved' );
+my @plantypes= ( 'Unknown', 'ISDN_e164', 'undef2', 'Data_x121', 'Telex', 'SCspec5', 'SCspec6', 'undef7', 'National', 'Private', 'ERMES', 'undefb', 'undefc', 'undefd', 'undefe', 'Reserved');
+
+# TP-PID  protocol identifier
+# bit7,6 == 00, bit5=0 : sme-to-sme protocol
+# bit7,6 == 00, bit5=1 : telematic interworking
+#   00000		implicit - device type is specific to this SC, or can be concluded on the basis of the address
+#   00001		telex (or teletex reduced to telex format)
+#   00010		group 3 telefax
+#   00011		group 4 telefax
+#   00100		voice telephone (i.e. conversion to speech)
+#   00101		ERMES (European Radio Messaging System)
+#   00110		National Paging system (known to the SC)
+#   00111		Videotex (T.100 [20] /T.101 [21])
+#   01000		teletex, carrier unspecified
+#   01001		teletex, in PSPDN
+#   01010		teletex, in CSPDN
+#   01011		teletex, in analog PSTN
+#   01100		teletex, in digital ISDN
+#   01101		UCI (Universal Computer Interface, ETSI DE/PS 3 01-3)
+#   01110..01111		(reserved, 2 combinations)
+#   10000		a message handling facility (known to the SC)
+#   10001		any public X.400-based message handling system
+#   10010		Internet Electronic Mail
+#   10011..10111		(reserved, 5 combinations)
+#   11000..11110		values specific to each SC, usage based on mutual agreement between the SME and the SC 	(7 combinations available for each SC)
+#   11111		A GSM/UMTS mobile station. The SC converts the SM from the received TP-DCS to any data coding scheme supported by the MS ( default )
+
+# bit7,6=01 
+# 000000		Short Message Type 0
+# 000001		Replace Short Message Type 1
+# 000010		Replace Short Message Type 2
+# 000011		Replace Short Message Type 3
+# 000100		Replace Short Message Type 4
+# 000101		Replace Short Message Type 5
+# 000110		Replace Short Message Type 6
+# 000111		Replace Short Message Type 7
+# 001000..011101		Reserved
+# 011110		Enhanced Message Service (Obsolete)
+# 011111		Return Call Message
+# 100000..111011		Reserved
+# 111100		ANSI-136 R-DATA
+# 111101		ME Data download
+# 111110		ME De-personalization Short Message
+# 111111		(U)SIM Data download
+
+# section 4.3: AT+CMGS=<length><CR>PDUDATA<CTRLZ>
+#    length excluding smsc address
+# section 4.2: AT+CMGR=<index><CR>
+#   -> +CMGR: <stat>,[alpha],<length><CRLF>pdu
+# +CMT: [<alpha>],<length><CRLF>pdu
+#
+# http://www.computer.org/portal/site/computer/menuitem.5d61c1d591162e4b0ef1bd108bcd45f3/index.jsp?&pName=computer_level1_article&TheCat=1055&path=computer/homepage/Dec07&file=howthings.xml&xsl=article.xsl&
+
+
+#      type
+#  91   1   - international
+#  a1   2   - national
+#  d0   5   - 7bit ascii
+#  01   0
+#  81   0
+# struct address {
+#     char nrofdigits;
+#     struct {
+#         int onebit:1
+#         int numbertype:3;
+#         int numberingplan:4;
+#     } type;
+#     char value[ceil(nrofdigits/2)]
+# }
+
+# numbertype
+# 0 Unknown
+# 1 International number
+# 2 National number
+# 3 Network specific number
+# 4 Subscriber number
+# 5 Alphanumeric, (coded according to 3GPP TS 23.038 [9] GSM 7-bit default alphabet)
+# 6 Abbreviated number
+# 7 Reserved for extension
+#
+# numberingplan
+# 0	Unknown
+# 1	ISDN/telephone numbering plan (E.164 [17]/E.163[18])
+# 2
+# 3	Data numbering plan (X.121)
+# 4	Telex numbering plan
+# 5	Service Centre Specific plan 1)
+# 6	Service Centre Specific plan 1)
+# 7
+# 8	National numbering plan
+# 9	Private numbering plan
+# a	ERMES numbering plan (ETSI DE/PS 3 01-3)
+# b
+# c
+# d
+# e
+# f	Reserved for extension
+
+# sms-submit:
+#       bb  
+# 00   MTI,RD,VPF,SRR,UDHI,RP
+# 01   MR
+# 02   TP-DA
+# ..
+#      TP-PID
+#      TP-DCS
+#      TP-VP
+# ..
+#      TP-UDL
+#      TP-UD
+
+# SMS-DELIVER:
+#       b   b   b    b bb  
+#       
+# 00   ,SRI,UDHI,RP,MMS,MTI
+# 01   TP-DA
+
+# 9.2.3.1 - TP-Message-Type-Indicator  (TP-MTI)
+#  bits 1,0 of byte0 of all pdu's
+#      xmit          |   recv
+#   0 DELIVER-REPORT | DELIVER
+#   1 SUBMIT         | SUBMIT-REPORT
+#   2 COMMAND        | STATUS-REPORT
+#   3 -              | -
+ 
+# 9.2.3.2 - TP-More-Messages-to-Send  (TP-MMS)
+#  bit 2 of byte0  of SMS-DELIVER and SMS-STATUS-REPORT
+#   0  More messages are waiting for the MS in this SC
+#   1  No more messages are waiting for the MS in this SC
+
+# 9.2.3.25 TP-Reject-Duplicates (TP-RD)
+#  bit 2 of byte0 of SMS-SUBMIT
+#   0 Instruct the SC to accept an SMS-SUBMIT for an SM still held in the SC which has the same TP-MR and the same TP-DA as a previously  submitted SM from  the same OA.
+#   1 Instruct the SC to reject an SMS-SUBMIT for an SM still held in the SC which has the same TP-MR and the same TP-DA as the  previously submitted SM  from the same OA. 
+
+# 9.2.3.3 - TP-Validity-Period-Format (TP-VPF)
+#  bit 4,3 of byte0 of SMS-SUBMIT
+#   0  TP-VP field not present
+#   1  TP-VP field present - relative format
+#   2  TP-VP field present - enhanced format
+#   3  TP-VP field present - absolute format 
+
+# 9.2.3.4 - TP-Status-Report-Indication (TP-SRI)
+#  bit 5 of byte0 of SMS-DELIVER
+#   0  A status report shall not be returned to the SME
+#   1  A status report shall be returned to the SME
+
+# 9.2.3.26 - TP-Status-Report-Qualifier (TP-SRQ)
+#  bit 5 of byte0 of SMS-STATUS-REPORT
+#   0 The SMS-STATUS-REPORT is the result of a SMS-SUBMIT.
+#   1 The SMS-STATUS-REPORT is the result of an SMS-COMMAND
+
+# 9.2.3.5 - TP-Status-Report-Request (TP-SRR)
+#  bit 5 of byte0 of SMS-SUBMIT, SMS-COMMAND
+#   0  A status report is not requested
+#   1  A status report is requested
+
+# 9.2.3.23 - TP-User-Data-Header-Indicator (TP-UDHI)
+#  bit 6 of byte0 of all pdu's
+#   0 The TP-UD field contains only the short message
+#   1 The beginning of the TP-UD field contains a Header in addition to the short message.
+
+# 9.2.3.17 - TP-Reply-Path (TP-RP)
+#  bit 7 of byte0 of SMS-DELIVER and SMS--SUBMIT
+#   0  TP-Reply-Path parameter is not set in this SMS-SUBMIT/DELIVER
+#   1  TP-Reply-Path parameter is set in this SMS-SUBMIT/DELIVER
+
+my %msgtypename=(
+    0=> {0=>'DELIVER-REPORT', 1=>'DELIVER'},
+    1=> {0=>'SUBMIT',         1=>'SUBMIT-REPORT'},
+    2=> {0=>'COMMAND',        1=>'STATUS-REPORT'},
+    3=> {0=>'-',              1=>'-'},
+);
+
+
+################# EO stolen code - more below 
+
+sub decode_sms_pdu_record {
+    my $info = shift;
+ 
+    my ($index, $status, $off, $len) = unpack("V4", $info);
+    print "    MessageIndex:\t$index\n";
+    print "    MessageStatus:\t$smsmsgstatus{$status} ($status)\n";
+
+    decodesms(undef, substr($info, $off, $len));
+
+}
+
+sub decode_sms_cdma_record {
+    print "dummy function\n";
+}
 
 sub decode_sms {
     my ($cid, $info) = @_;
@@ -877,6 +1275,25 @@ sub decode_sms {
 	print "  MaxMessages:\t$max\n";
 	print "  CdmaShortMessageSize:\t$cdmasize\n";
 	print "  ScAddress:\t", &utf16_field($info, $off, $len), "\n";
+
+    } elsif ($cid == 2) { # MBIM_CID_SMS_READ
+	my ($format, $ec) = unpack("V2", $info);
+	print "  Format:\t$smsformat{$format}\n";
+	print "  ElementCount (EC): $ec\n  SmsRefList:\n";
+	for (my $i = 0; $i < $ec; $i++) {
+	    my ($off, $len) = unpack("VV", substr($info, 8 + 8 * $i, 8));
+	    if ($format == 0) {
+		&decode_sms_pdu_record(substr($info, $off, $len));
+	    } elsif ($format == 1) {
+		&decode_sms_cdma_record(substr($info, $off, $len));
+	    } else {
+		print "Unsupported SMS format: $format\n";
+	    }
+	}
+    } elsif ($cid == 5) { # MBIM_CID_SMS_MESSAGE_STORE_STATUS 
+	my ($flag, $index) = unpack("V2", $info);
+	print "  Flags:\t$smsflags{$flag} ($flag)\n";
+	print "  MessageIndex:\t$index\n";
     } else {
 	print "SMS CID $cid decoding is not yet supported\n";
     }
@@ -1150,6 +1567,19 @@ sub mk_qmi {
 open(F, "+<", $mgmt) || die "open $mgmt: $!\n";
 autoflush F 1;
 
+# check message size
+require 'sys/ioctl.ph';
+eval 'sub IOCTL_WDM_MAX_COMMAND () { &_IOC( &_IOC_READ, ord(\'H\'), 0xa0, 2); }' unless defined(&IOCTL_WDM_MAX_COMMAND);
+my $foo = '';
+my $r = ioctl(F, &IOCTL_WDM_MAX_COMMAND, $foo);
+if ($r) {
+    $maxctrl = unpack("s", $foo);
+} else {
+    warn("ioctl failed: $!\n") if $debug;
+}
+print "MaxMessageSize=$maxctrl\n"  if $debug;
+
+
 # get the command
 my $cmd = shift;
 
@@ -1173,6 +1603,8 @@ if ($cmd eq "open") {
     print F &mk_cid_register_state();
 } elsif ($cmd eq "getradiostate") {
     print F &mk_cid_radio_state;
+} elsif ($cmd eq "setradiostate") {
+    print F &mk_cid_radio_state(1);
 } elsif ($cmd eq "getservices") {
     print F &mk_command_msg('BASIC_CONNECT', 16, 0, '');
 } elsif ($cmd eq "dssconnect") {
@@ -1200,3 +1632,182 @@ if ($cmd eq "open") {
 # close device
 close(F);
 
+
+
+
+
+
+
+
+##########
+
+
+
+##########
+
+sub decodesms {
+##    my ($dir, $smshex)=@_;
+    my ($dir, $data)=@_;
+
+##    my $data= pack("H*", $smshex);
+    my $ofs= 0;
+    my $smsclen= unpack("C", substr($data, $ofs++, 1));
+    my $smscdata= substr($data, $ofs, $smsclen);
+    $ofs+=$smsclen;
+
+    printf("smsc: %s\n", decode_address($smscdata));
+
+    # if direction not known, assume it is outgoing when the smsc length == 0
+    my $incoming= defined $dir ? $dir : $smsclen!=0;
+
+    my $pduhdr= unpack("C", substr($data, $ofs++, 1));
+    my $mti= ($pduhdr&3);
+    my $pdutype= $pdutypes[$mti][$incoming];
+
+    printf("%s %s\n", $pdutype, $mti?"done":"");
+
+    if (hasfield($pdutype, "MR")) {
+        # message reference
+        my $mr= unpack("C", substr($data, $ofs++, 1));
+        printf("MR: %02x\n", $mr);
+    }
+    if (hasfield($pdutype, "DA") || hasfield($pdutype, "OA")) {
+        # destination/originating address
+        my $srclen= unpack("C", substr($data, $ofs++, 1));
+        my $srcnum= substr($data, $ofs, ($srclen-1)/2+2);
+        $ofs += ($srclen-1)/2+2;
+        printf("%s: %s\n", hasfield($pdutype, "DA")?"DA":hasfield($pdutype, "OA")?"OA":"??",
+            decode_address($srcnum));
+    }
+    if (hasfield($pdutype, "PID")) {
+        # protocol id
+        # todo 
+        my $protocol= unpack("C", substr($data, $ofs++, 1));
+        printf("prot: %02x\n", $protocol);
+        # 0x00
+        # 0x0b
+        # 0x0d
+        # 0x10
+    }
+    my $dcs;
+    if (hasfield($pdutype, "DCS")) {
+        # data coding scheme
+        # todo , see 23.038
+        $dcs= unpack("C", substr($data, $ofs++, 1));
+        printf("dcs: %02x\n", $dcs);
+    }
+    if (hasfield($pdutype, "VP") && ($pduhdr&0x18)) {
+        # validity period
+        my $vpf= ($pduhdr&0x18)>>3;
+        my @fmt=qw(- rel enh abs);
+        # rel: 1 byte
+        # abs: 7 bytes
+        # enh: 7 bytes
+        if ($vpf==1) {
+            my $vp= unpack("C", substr($data, $ofs++, 1));
+            printf("VP: %s %d\n", $fmt[$vpf], $vp);
+        }
+        else {
+            my $vp= substr($data, $ofs, 7);
+            $ofs+=7;
+            printf("VP: %s %s\n", $fmt[$vpf], unpack 'H*',$vp);
+        }
+    }
+    if (hasfield($pdutype, "SCTS")) {
+        # sc timestamp
+        my $scts= unpack 'H*', unpack("a7", substr($data, $ofs, 7));
+        $ofs+=7;
+        $scts =~ s/(\w)(\w)/$2$1/g;
+        printf("scts: %s\n", $scts);
+    }
+    my $udl;
+    if (hasfield($pdutype, "UDL")) {
+        # userdata length
+        $udl= unpack("C", substr($data, $ofs++, 1));
+    }
+    if (hasfield($pdutype, "UD")) {
+        # user data
+        # $dcs=08 : unicode
+        # $dcs=11 : 7bit
+        if ($dcs&0x20) {
+            printf("compressed[%02x]: %s\n", $udl, unpack("H*", substr($data, $ofs)));
+        }
+        elsif (($dcs&0x0c)==0) {
+            # 7 bit data
+            my $b7len= int(($udl*7)/8)+1;
+            my $ud= substr($data, $ofs, $b7len);
+            $ofs += $b7len;
+	    my $dcode = substr(sms7to8bit($ud),0,$udl*2);
+            printf("msg: '%s'\n", $dcode);
+	    $dcode =~ tr/\@//d;
+	    printf("msg: '%s'\n", decode('utf8', $dcode)) ;
+        }
+        elsif (($dcs&0x0c)==0x04) {
+            # 8 bit data
+            my $ud= substr($data, $ofs, $udl);
+            $ofs += ($udl*7)/8;
+            printf("msg: '%s'\n", $ud);
+        }
+        elsif (($dcs&0x0c)==0x08) {
+            # ucs2 data
+            my $ud= substr($data, $ofs, $udl);
+            $ofs += $udl;
+            printf("msg: U'%s'\n", pack("U*", unpack("n*",$ud)));
+        }
+        # 0x91
+        # 0xd0
+        else {
+            printf("msg: unknown encoding: %s\n", unpack("H*", substr($data, $ofs)));
+        }
+    }
+    printf("leftover: %d\n", length($data)-$ofs);
+}
+
+sub decode_address {
+    return "-" if ($_[0] eq "");
+    my ($typebyte, $addr)= unpack("Ca*", $_[0]);
+    my ($one, $type, $plan)=(($typebyte>>7)&1, ($typebyte>>4)&7, $typebyte&0xf);
+
+    return sprintf("%d.%s.%s:%s", $one, $numtypes[$type], $plantypes[$plan], decodenumber($addr, $type))
+}
+sub sms7to8bit {
+my @xlat= (
+"@", "Â£", "\$", "Â¥", "eÌ€", "eÌ", "uÌ€", "iÌ€", "oÌ€", "CÌ§", "\n", "Ã˜", "Ã¸", "\r", "AÌŠ", "aÌŠ",
+"âˆ†", "_", "Î¦", "Î“", "Î›", "Î©", "Î ", "Î¨", "Î£", "Î˜", "Îž", "\x1b", "Ã†", "Ã¦", "ÃŸ", "EÌ", 
+"\x20", "!", "\x22", "#", "Â¤", "%", "&", "\x27", "(", ")", "*", "+", ",", "-", ".", "/",
+"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ":", ";", "<", "=", ">", "?",
+"Â¡", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O",
+"P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z", "AÌˆ", "OÌˆ", "NÌƒ", "UÌˆ", "Â§",
+"Â¿", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+"p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "aÌˆ", "oÌˆ", "nÌƒ", "uÌˆ", "a",
+
+);
+my @xlat2= (
+" ", " ", " ", " ", " ", " ", " ", " ", " ", " ", "\x03", " ", " ", " ", " ", " ",
+" ", " ", " ", " ", "^", " ", " ", " ", " ", " ", " ", "\x1b", " ", " ", " ", " ",
+" ", " ", " ", " ", " ", " ", " ", " ", "{", "}", " ", " ", " ", " ", " ", "\\",
+" ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", "[", "~", "]", " ",
+"|", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ",
+" ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ",
+" ", " ", " ", " ", " ", "â‚¬", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ",
+" ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ",
+);
+
+my $esc;
+#    printf("xx-%s\n", unpack("H*", $_[0]));
+    my $bits= unpack("b*", $_[0]);
+#    if (length($bits)%7) { $bits=substr($bits, 0, -(length($bits)%7)); }
+    return join "", map { if ($esc) { $esc--; $xlat2[ord($_)] } elsif ($_ eq "\x1b") { $esc++ } else { $xlat[ord($_)] } } map { pack("b*", $_) } split /(\d{7})/, $bits;
+}
+sub decodenumber {
+    my ($numdata, $type)= @_;
+    if ($type==5) {
+        my $str= sms7to8bit($numdata);
+        $str =~ s/\x00$//;
+        return $str;
+    }
+    else {
+        (my $nr= unpack 'H*', $numdata) =~ s/(\w)(\w)/$2$1/g;
+        return $nr;
+    }
+}
