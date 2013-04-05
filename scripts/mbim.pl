@@ -1345,6 +1345,7 @@ my %decoder = (
     "MSFWID" => \&decode_msfwid,
     );
 
+my %frag;
 
 sub decode_mbim {
     my $msg = shift;
@@ -1368,6 +1369,18 @@ sub decode_mbim {
 	print "MBIM_FRAGMENT_HEADER\n";
 	printf "  TotalFragments:\t0x%08x\n", $total;
 	printf "  CurrentFragment:\t0x%08x\n", $current;
+
+	# cache fragments for later?
+	if ($total > 1) {
+	    my $key = sprintf "%08x-%d", $type, $tid;
+	    if ($current == 0) {
+		$frag{$key} = $msg;
+	    } else {
+		$frag{$key} .= substr($msg, 20);
+	    }
+	    return if ($current < $total - 1);
+	    $msg = delete $frag{$key};
+	}	    
 
 	my $uuid = uuid_to_string(substr($msg, 20, 16));
 	my $service = &uuid_to_service($uuid);
@@ -1396,6 +1409,18 @@ sub decode_mbim {
 	print "MBIM_FRAGMENT_HEADER\n";
 	print "  TotalFragments:\t$total\n";
 	print "  CurrentFragment:\t$current\n";
+
+	# cache fragments for later?
+	if ($total > 1) {
+	    my $key = sprintf "%08x-%d", $type, $tid;
+	    if ($current == 0) {
+		$frag{$key} = $msg;
+	    } else {
+		$frag{$key} .= substr($msg, 20);
+	    }
+	    return if ($current < $total - 1);
+	    $msg = delete $frag{$key};
+	}	    
 
 	my $uuid = uuid_to_string(substr($msg, 20, 16));
 	my $service = &uuid_to_service($uuid);
