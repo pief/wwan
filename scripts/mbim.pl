@@ -55,6 +55,16 @@ followed by QMI message number and TLVs as a combination of hex values and byte 
 e.g
   0x0024 0x01 00 0x10 01 0f
 
+
+Or for offline decoding only:
+
+   $0 [--[no]debug] offline <message>
+
+Example:
+
+   $0 offline 01:00:00:80:10:00:00:00:01:00:00:00:00:00:00:00
+
+
 EOH
     ;
     exit;
@@ -485,9 +495,8 @@ sub mk_cid_dss_connect {
 
 sub mk_cid_connect {
     my ($apn, $activate, $sessionid) = @_;
-
-    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
     $sessionid ||= 0;
+    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
     $apn = encode('utf16le', $apn);
     my $apnlen = length($apn);
     # create the data buffer:
@@ -503,6 +512,32 @@ sub mk_cid_connect {
 		    0, # Compression  
 		    0, # AuthProtocol  
 		    1, # IPType  (IPv4)
+	);
+    my $type = 0 ? 'Vpn' : 'Internet';
+    $data .= string_to_uuid($context{"MBIMContextType$type"});
+    $data .= $apn;
+    return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
+}
+
+sub mk_ipv6_connect {
+    my ($apn, $activate, $sessionid) = @_;
+    $sessionid ||= 0;
+    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
+    $apn = encode('utf16le', $apn);
+    my $apnlen = length($apn);
+    # create the data buffer:
+    my $data = pack("V11", 
+		    $sessionid, # SessionId  
+		    !!$activate, # ActivationCommand  
+		    60, # AccessStringOffset
+		    $apnlen, # AccessStringSize  
+		    0, # UserNameOffset  
+		    0, # UserNameSize  
+		    0, # PasswordOffset  
+		    0, # PasswordSize  
+		    0, # Compression  
+		    0, # AuthProtocol  
+		    2, # IPType  (IPv6)
 	);
     my $type = 0 ? 'Vpn' : 'Internet';
     $data .= string_to_uuid($context{"MBIMContextType$type"});
@@ -683,6 +718,31 @@ sub decode_pin_state {
     print "  RemainingAttempts:\t$attempts\n";
 }
 
+# Table 10‐31: MBIM_PIN_MODE 
+my %pinmode = (
+    0 => 'MBIMPinModeNotSupported',
+    1 => 'MBIMPinModeEnabled',
+    2 => 'MBIMPinModeDisabled',
+    );
+
+# Table 10‐32: MBIM_PIN_FORMAT 
+my %pinformat = (
+    0 => 'MBIMPinFormatUnknown',
+    1 => 'MBIMPinFormatNumeric',
+    2 => 'MBIMPinFormatAlphaNumeric',
+    );
+
+
+sub decode_pin_desc {
+    my ($info, $desc) = @_;
+    my ($mode, $format, $min, $max) = unpack("V4", $info);
+    $mode = $pinmode{$mode} || 'MBIMPinModeUnknown';
+    $format = $pinformat{$format} || 'MBIMPinFormatUnknown';
+    $mode =~ s/^MBIMPinMode//;
+    $format =~ s/^MBIMPinFormat//;
+    print "  $desc:\t$mode, $format, min = $min, max = $max\n";
+}
+
 # Table 10‐37: MBIM_PROVIDER 
 sub decode_mbim_provider {
     my $info = shift;
@@ -793,6 +853,21 @@ sub decode_device_service {
     }
 }
 
+# Table 10‐141: MBIM_EVENT_ENTRY 
+sub decode_event_entry {
+    my $info = shift;
+    my $uuid = uuid_to_string(substr($info, 0, 16));
+    my $service = uuid_to_service($uuid);
+    print "  $service ($uuid)\n";
+    my $cids = unpack("V", substr($info, 16, 4));
+    print "    CidCount:\t$cids\n";
+    my @cids = unpack("V$cids", substr($info, 20, 4 * $cids));
+    print "    CidList:\t", join(', ', @cids), "\n";
+    foreach my $cid (@cids) {
+	print "      ", &cid_to_string($service, $cid), "\n";
+    }
+}
+
 my %ipcfg = (
     0x01 => 'address',
     0x02 => 'gateway',
@@ -862,6 +937,11 @@ sub decode_basic_connect {
 	printf "  SwRadioState:\t%s\n", $sw ? 'on' : 'off'; 
     } elsif ($cid == 4) { # MBIM_CID_PIN
 	&decode_pin_state($info);
+    } elsif ($cid == 5) { # MBIM_CID_PIN_LIST
+	my $i = 0;
+	for my $pin (qw/Pin1 Pin2 DeviceSimPin DeviceFirstSimPin NetworkPin NetworkSubsetPin ServiceProviderPin CorporatePin SubsidyLock Custom/) {
+	    &decode_pin_desc(substr($info, $i++ * 16, 16), $pin);
+	}
     } elsif ($cid == 6) { # MBIM_CID_HOME_PROVIDER
 	&decode_mbim_provider($info);
     } elsif ($cid == 7) { # MBIM_CID_PREFERRED_PROVIDERS
@@ -891,7 +971,7 @@ sub decode_basic_connect {
 	my $type = uuid_to_string(substr($info, 16, 16));
 	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
 	my $nwerr = unpack("V", substr($info, 32, 4));
-	print "  NwError:\t$nwerr ($nwerror{$nwerr})\n";
+	print "  NwError:\t$nwerr (", $nwerror{$nwerr} || 'unknown', ")\n";
     } elsif ($cid == 13) { # MBIM_CID_PROVISIONED_CONTEXTS
 	my $ec = unpack("V", $info);
 	print "  ElementCount (EC): $ec\n  ProvisionedContextRefList:\n";
@@ -933,6 +1013,13 @@ sub decode_basic_connect {
 	for (my $i = 0; $i < $dsc; $i++) {
 	    my ($off, $len) = unpack("VV", substr($info, 8 + 8 * $i, 8));
 	    &decode_device_service(substr($info, $off, $len));
+	}
+    } elsif ($cid == 19) { # MBIM_CID_DEVICE_SERVICE_SUBSCRIBE_LIST
+	my $ec = unpack("V", $info);
+	print "  ElementCount (EC): $ec\n  DeviceServiceSubscribeRefList:\n";
+	for (my $i = 0; $i < $ec; $i++) {
+	    my ($off, $len) = unpack("VV", substr($info, 4 + 8 * $i, 8));
+	    &decode_event_entry(substr($info, $off, $len));
 	}
 
     } else {
@@ -1364,7 +1451,7 @@ sub decode_mbim {
  	my $status = unpack("V", substr($msg, 12));
 	print &status_to_string($status), " ($status)\n";
 
-    } elsif ($type == 0x80000003) { # MBIM_COMMAND_DONE  
+    } elsif ($type == 0x80000003 or $type == 0x00000003) { # MBIM_COMMAND_DONE or MBIM_COMMAND
 	my ($total, $current) = unpack("VV", substr($msg, 12)); # FragmentHeader  
 	print "MBIM_FRAGMENT_HEADER\n";
 	printf "  TotalFragments:\t0x%08x\n", $total;
@@ -1459,7 +1546,7 @@ sub read_mbim {
 	    my $len = 0;
 	    if ($len < 3 || $len < $msglen) {
 		my $tmp;
-		my $n = sysread(F, $tmp, 4096);
+		my $n = sysread(F, $tmp, $maxctrl);
 		if ($n) {
 		    $len = $n;
 		    $raw = $tmp;
@@ -1560,7 +1647,7 @@ sub mk_qmi {
 	    if ($tlv) {
 		# all TLVs need some data
 		return '' unless @data;
-		$tlvbytes .= pack("CvC*", $tlv, $#data, @data);
+		$tlvbytes .= pack("CvC*", $tlv, $#data+1, @data);
 		@data = ();
 	    }
 	    $tlv = hex($arg);
@@ -1575,7 +1662,7 @@ sub mk_qmi {
     if ($tlv) {
 	# all TLVs need some data
 	return '' unless @data;
-	$tlvbytes .= pack("CvC*", $tlv, $#data, @data);
+	$tlvbytes .= pack("CvC*", $tlv, $#data+1, @data);
     }
 
     my $tlvlen = length($tlvbytes);
@@ -1587,6 +1674,16 @@ sub mk_qmi {
 }  
 
 ### main ###
+
+# get the command
+my $cmd = shift;
+
+# decode an message from the command line
+# e.g. 01:00:00:80:10:00:00:00:01:00:00:00:00:00:00:00
+if ($cmd eq "offline") {
+    &decode_mbim(pack("C*", map { hex } split(/:/, shift)));
+    exit(0);
+}
 
 # open it now and keep it open until exit
 open(F, "+<", $mgmt) || die "open $mgmt: $!\n";
@@ -1605,9 +1702,6 @@ if ($r) {
 print "MaxMessageSize=$maxctrl\n"  if $debug;
 
 
-# get the command
-my $cmd = shift;
-
 if ($cmd eq "open") {
     print F &mk_open_msg;
 } elsif ($cmd eq "caps") {
@@ -1618,6 +1712,8 @@ if ($cmd eq "open") {
     print F &mk_cid_pin($pin{1}) if $pin{1};
 } elsif ($cmd eq "connect") {
     print F &mk_cid_connect($apn, 1, $session);
+} elsif ($cmd eq "ipv6") {
+    print F &mk_ipv6_connect($apn, 1, $session);
 } elsif ($cmd eq "disconnect") {
     print F &mk_cid_connect('', 0, $session);
 } elsif ($cmd eq "attach") {
@@ -1632,6 +1728,8 @@ if ($cmd eq "open") {
     print F &mk_cid_radio_state(1);
 } elsif ($cmd eq "getservices") {
     print F &mk_command_msg('BASIC_CONNECT', 16, 0, '');
+} elsif ($cmd eq "getip") {
+    print F &mk_command_msg('BASIC_CONNECT', 15, 0, pack("V15",  $session, 0 x 14));
 } elsif ($cmd eq "dssconnect") {
     print F &mk_cid_dss_connect(shift, 1, $session);
 } elsif ($cmd eq "dssdisconnect") {
