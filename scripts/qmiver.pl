@@ -63,7 +63,11 @@ warn "Device: ", sprintf("%04x:%04x", $dev->idVendor(), $dev->idProduct()), "\n"
 
 $dev->open();
 
-my $cfg = $dev->config()->[0];
+# get the number of configs
+my @cfgs = @{$dev->config()};
+
+# select the last one??
+my $cfg = pop(@cfgs);
 
 # cannot use ifnum as array idx as the numbering may not be consecutive...
 my @intflist = grep { !$opt{'if'} || $_->[0]->bInterfaceNumber == $opt{'if'} } @{$cfg->interfaces()};
