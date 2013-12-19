@@ -34,7 +34,26 @@ die "Cannot find any such device: $opt{'device'} - $!\n" unless $dev;
 warn "Device: ", sprintf("%04x:%04x", $dev->idVendor(), $dev->idProduct()), "\n";
 
 $dev->open();
-my ($ret, $descr) = &set_config($dev, $opt{cfg});
+
+# unbind all drivers
+foreach my $cfg (@{$dev->config()}) {
+foreach (@{$cfg->interfaces()}) {
+    my $ifnum = $_->[0]->bInterfaceNumber;
+    
+    my $driver = $dev->get_driver_np($ifnum);
+    if ($driver) {
+	warn "unbinding interface $ifnum from kernel driver \"$driver\"\n";
+	if ($dev->detach_kernel_driver_np($ifnum) < 0) {
+	    warn "unbinding FAILED\n";
+	    return undef;
+	}
+    }
+}
+}
+my $ret = $dev->set_configuration($opt{cfg});
+
+#my ($ret, $descr) = &set_config($dev, $opt{cfg});
+warn "ret=$ret\n";
 
 sub set_config {
     my ($dev, $cfg) = @_;
@@ -42,7 +61,7 @@ sub set_config {
     my $req = 0x09;       # USB_REQ_SET_CONFIGURATION
     my $wValue = 0x0;
     
-    return (-1, undef) unless $cfg;
+    return (-1, undef) unless defined($cfg);
 
     my $buf = 0 x 512; # pre-allocate buffer - libusb is not perl!
     my $ret = $dev->control_msg($reqtype,
