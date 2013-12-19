@@ -78,10 +78,100 @@ struct qmictl {
 	__u8 tid;
 	__u16 msgid;
 	__u16 tlvsize;
+	__u8 tlv[];
 } __attribute__((__packed__));
 
-/* -- eof from qcqmi.c --- */
+struct qmiany {
+	struct qmux h;
+	__u8 req;
+	__u16 tid;
+	__u16 msgid;
+	__u16 tlvsize;
+	__u8 tlv[];
+} __attribute__((__packed__));
 
+struct qmitlv {
+	__u8 type;
+	__u16 len;
+	__u8 data[];
+} __attribute__((__packed__));
+
+size_t hexdump(char *buf, size_t buflen, unsigned char *data, size_t len)
+{
+	int i;
+	size_t max = 3 * len;
+ 
+	if (max >= buflen)
+		return 0;
+	for (i = 0; i < len; i++)
+		sprintf(buf + i * 3, " %02hhx", data[i]);
+	return max;
+}
+
+size_t asciidump(char *buf, size_t buflen, unsigned char *data, size_t len)
+{
+	int i;
+	size_t max = len + 1;
+ 
+	if (max >= buflen)
+		return 0;
+	buf[0] = '\t';
+	for (i = 0; i < len; i++)
+		if (data[i] >= ' ' && data[i] <= 127)
+			buf[i + 1] = data[i];
+		else
+			buf[i + 1] = '.';
+	buf[max + 1] = 0;
+	return max;
+}
+
+int formatqmux(char *buf, size_t buflen, const char *qmux)
+{
+	struct qmux *h = (void *)qmux;
+	struct qmictl *ctl = (void *)qmux;
+	struct qmiany *msg = (void *)qmux;
+	struct qmitlv *tlv;
+	__u8 *tlvdata;
+	int ret, tlvlen;
+
+	ret = snprintf(buf, buflen, ".tf=%u\n.len=%u\n.ctrl=%#04hhx\n.service=%#04hhx\n.cid=%#04hhx\n",
+		h->tf, h->len, h->ctrl, h->service, h->qmicid);
+
+	if (!h->service) {
+		tlvdata = ctl->tlv;
+		tlvlen = ctl->tlvsize;
+		ret += snprintf(buf + ret, buflen - ret, ".req=0x%02hhx\n.tid=%hhu\n.msgid=0x%04hx\n.tlvsize=%hu",
+			ctl->req, ctl->tid, ctl->msgid, tlvlen);
+	} else {
+		tlvdata = msg->tlv;
+		tlvlen = msg->tlvsize;
+		ret += snprintf(buf + ret, buflen - ret, ".req=0x%02hhx\n.tid=%hu\n.msgid=0x%04hx\n.tlvsize=%hu",
+			msg->req, msg->tid, msg->msgid, tlvlen);
+	}
+	tlv = (void *)tlvdata;
+	while ((__u8 *)tlv < tlvdata + tlvlen) {
+//		printf("tlv=%p, tlvdata=%p, tlvlen=%u\n", tlv, tlvdata, tlvlen);
+		ret += snprintf(buf + ret, buflen - ret, "\n[%02hhx] (%hu)", tlv->type, tlv->len);
+		ret += hexdump(buf + ret, buflen - ret, tlv->data, tlv->len);
+		ret += asciidump(buf + ret, buflen - ret, tlv->data, tlv->len);
+		tlv = (struct qmitlv *)((char *)tlv + tlv->len + sizeof(*tlv));
+		
+	}
+	ret += snprintf(buf + ret, buflen - ret, "\n\n");
+	return ret;
+}
+
+static char dbgbuf[4096];
+#define IN 0
+#define OUT 1
+int dbgdump(char *data, int dir)
+{
+	formatqmux(dbgbuf, sizeof(dbgbuf), data);
+	fprintf(stderr, "%s\n%s", dir ? ">>>>" : "<<<<", dbgbuf);
+	return 0;
+}
+
+/* -- eof from qcqmi.c --- */
 
 
 /* global data */
@@ -91,10 +181,12 @@ static int fd;                               /* handle */
 static int bufsz = 4096;                     /* message size */
 static char filename[] = "/dev/cdc-wdm0";    /* filename */
 static pthread_mutex_t wr_mutex = PTHREAD_MUTEX_INITIALIZER; /* write lock */
-static __u16 vid = 0x1199;
-static __u16 pid = 0x68a2;  /* USB vid:pid */
+static int vidpid; /* USB vid:pid */
 #define MEIDLEN 14
 static char meid[MEIDLEN] = "0123456789abcd"; /* meid */
+
+/* usbmisc class name - was previously "usb" */
+static const char usbmisc[] = "usbmisc";
 
 /* defining a QMI reply or indication message */
 struct qmimsg {
@@ -208,6 +300,8 @@ static int do_ctl(char *buf, size_t buflen, int timeout)
 	/* set up matching key */
 	ctl = (struct qmictl *)buf;
 	msgid = ctl->msgid;
+
+	dbgdump(buf, OUT);
 
 	/* take the write lock - no one are allowed to write anything while we run this! */
 	pthread_mutex_lock(&wr_mutex);
@@ -374,11 +468,19 @@ static void cuseqmi_open(fuse_req_t req, struct fuse_file_info *fi)
 	fuse_reply_open(req, fi);
 }
 
+static void cuseqmi_flush(fuse_req_t req, struct fuse_file_info *fi)
+{
+	struct qclient *client = (void *)fi->fh;
+
+	fprintf(stderr, "%s: client=%p\n", __func__, client);
+	fuse_reply_err(req, 0);
+}
+
 static void cuseqmi_release(fuse_req_t req, struct fuse_file_info *fi)
 {
 	struct qclient *client = (void *)fi->fh;
 
-	fprintf(stderr, "%s\n", __func__);
+	fprintf(stderr, "%s: client=%p\n", __func__, client);
 	fi->fh = (uint64_t)NULL;
 	destroy_client(client);
 	fuse_reply_err(req, 0);
@@ -444,6 +546,8 @@ static void cuseqmi_write(fuse_req_t req, const char *buf, size_t size, off_t of
 	memcpy(wbuf + qmux_size, buf, size);
 	qmuxify(wbuf, client->cid, size);
 
+	dbgdump(wbuf, OUT);
+
 	/* lock for write */
 	pthread_mutex_lock(&wr_mutex);
 	status = write(fd, wbuf, size + qmux_size);
@@ -468,7 +572,6 @@ static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 {
 	struct qclient *client = (void *)fi->fh;
 	int ret = 0;
-	unsigned int vidpid = vid << 16 | pid;
 
 	fprintf(stderr, "%s: cmd=%#010x, arg=%p\n", __func__, cmd, arg);
 
@@ -483,7 +586,7 @@ static void cuseqmi_ioctl(fuse_req_t req, int cmd, void *arg,
 		if (client->cid != (__u16)-1) {
 			DBG("Close the current connection before opening a new one\n");
 			fuse_reply_err(req, EBADR);
-                } else {
+		} else {
 			__u8 cid = (long)arg;
 			DBG("Setting up QMI for service %u", cid);
 			ret = alloc_cid(client, cid);
@@ -629,6 +732,9 @@ static void copy_msg_to_clients(char *buf, int len)
 	/* analyze the QMI message first */
 	if (len < sizeof(struct qmux) + 1)
 		return;
+
+	dbgdump(buf, IN);
+
 	q = (struct qmux *)buf;
 	flags = buf[qmux_size]; /* the first byte after the QMUX */
 
@@ -668,7 +774,7 @@ void *readcdcwdm(void *tmp)
 	   /* find matching client(s) and link a copy into the rq */
 	   if (n > 0)
 		   copy_msg_to_clients(buf, n);
-
+	   
    } while (n >= 0);
    free(buf);
    perror("reader exiting:");
@@ -676,9 +782,50 @@ void *readcdcwdm(void *tmp)
 }
 
 
+/* verify that filename is a usbmisc device and return vid+pid */
+int vidpidfromsysfs(const char *filename)
+{
+	char buf[128];
+	char *devname;
+	int rc;
+	unsigned int vid, pid;
+	FILE *s;
+
+	devname = strrchr(filename, '/');
+	if (!devname)
+		return -ENODEV;
+
+	if (snprintf(buf, sizeof(buf), "/sys/class/%s/%s/device/../idProduct", usbmisc, devname) >= sizeof(buf))
+		return -ENODEV;
+	s = fopen(buf, "r");
+	if (!s) {
+		perror(__func__);
+		return -ENODEV;
+	}
+	rc = fscanf(s,"%x", &pid);
+	fclose(s);
+	if (rc != 1)
+		return -ENODEV;
+
+	if (snprintf(buf, sizeof(buf), "/sys/class/%s/%s/device/../idVendor", usbmisc, devname) >= sizeof(buf))
+		return -ENODEV;
+	s = fopen(buf, "r");
+	if (!s) {
+		perror(__func__);
+		return -ENODEV;
+	}
+	rc = fscanf(s,"%x", &vid);
+	fclose(s);
+	if (rc != 1)
+		return -ENODEV;
+
+	fprintf(stderr, "found %04x:%04x\n", vid, pid);
+	return vid << 16 | pid;
+}
 
 static const struct cuse_lowlevel_ops cuseqmi_clop = {
 	.open		= cuseqmi_open,
+	.flush          = cuseqmi_flush,
 	.release        = cuseqmi_release,
 	.read		= cuseqmi_read,
 	.write		= cuseqmi_write,
@@ -710,6 +857,11 @@ int main(int argc, char **argv)
 		strncat(dev_name, param.dev_name, sizeof(dev_name) - 9);
 	}
 
+	/* verify that filename is a usbmisc device and save vid+pid */
+	vidpid = vidpidfromsysfs(filename);
+	if (vidpid <= 0)
+		return vidpid;
+	
 	/* open QMI device */
 	fd = open(filename, O_RDWR);
 	if (fd < 0) {
@@ -720,7 +872,6 @@ int main(int argc, char **argv)
 	/* use the new ioctl to get the message size, falling back to
 	 * static default if it fails
 	 */
-
 
 	/* create reader thread */
 	pthread_attr_init(&attr);
@@ -735,7 +886,6 @@ int main(int argc, char **argv)
 
 	/* run QMI_CTL get version, serial numbers etc */
 
-
 	/* create qcqmi device */
 	memset(&ci, 0, sizeof(ci));
 	ci.dev_major = param.major;
@@ -745,17 +895,16 @@ int main(int argc, char **argv)
 	ci.flags = CUSE_UNRESTRICTED_IOCTL;
 
 	rc = cuse_lowlevel_main(args.argc, args.argv, &ci, &cuseqmi_clop,  NULL);
-
 	printf("cuse_lowlevel_main returned %d\n", rc);
 	
-	/* close file and wait for reader to exit */
-	close(fd);
-
+	printf("calling pthread_cancel()\n");
 	pthread_cancel(readthread);
+
 	if (pthread_join(readthread, &status) < 0)
 		perror("pthread_join:");
 	else
 		printf("status=%ld\n", (long)status);
 
+	close(fd);
 	return rc;
 }
