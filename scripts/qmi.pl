@@ -408,6 +408,45 @@ my %msg = (
 	},
 
     },
+    0x0043 => {
+	name => 'GET_CELL_LOCATION_INFO',
+	0x10 => {
+	    name => 'GERAN Info',
+	    decode => sub { return '' }, # => default handling
+	},
+	0x11 => {
+	    name => 'UMTS Info',
+	    decode => sub { return '' }, # => default handling
+	},
+	0x12 => {
+	    name => 'CDMA Info',
+	    decode => sub { return '' }, # => default handling
+	},
+	0x13 => {
+	    name => 'LTE Info - Intrafrequency',
+	    decode => \&tlv_lte_intrafreq,
+	},
+	0x14 => {
+	    name => 'LTE Info - Interfrequency',
+	    decode => \&tlv_lte_interfreq,
+	},
+	0x15 => {
+	    name => 'LTE Info - Neighboring GSM',
+	    decode => \&tlv_lte_neigh_gsm,
+	},
+	0x16 => {
+	    name => 'LTE Info - Neighboring WCDMA',
+	    decode => \&tlv_lte_neigh_wcdma,
+	},
+	0x17 => {
+	    name => 'UMTS Cell ID',
+	    decode => sub { return '' }, # => default handling
+	},
+	0x18 => {
+	    name => 'WCDMA Info - LTE Neighbor Cell Info Set',
+	    decode => sub { return '' }, # => default handling
+	},
+    },
     0x004d => {
 	name => 'GET_SYS_INFO',
 	0x12 => {
@@ -772,6 +811,96 @@ my %aquis_order_map = (
 sub tlv_aquis_pref {
     my $pref = unpack("V", pack("C*", @{shift()}));
     return $aquis_order_map{$pref};
+}
+
+sub _decode_lte_pci_data {
+    my @data = @_;
+    my ($pci, $rsrq, $rsrp, $rssi, $srxlev) = unpack("vs<s<s<s<", pack("C*", @data));
+    return sprintf("%4u: rsrq=%d dB, rsrp=%d dBm, rssi=%d dBm srxlev=%d", $pci, $rsrq/10, $rsrp/10, $rssi/10, $srxlev);
+}
+
+sub tlv_lte_intrafreq {
+    my ($ue_in_idle, $plmn1, $plmn2, $plmn3, $tac, $global_cell_id, $earfcn, $serving_cell_id,
+	$cell_resel_priority, $s_non_intra_search, $thresh_serving_low, $s_intra_search, $cells_len, @r) 
+	= unpack("CC3vVvvCCCCCC*", pack("C*", @{shift()}));
+    my $ret = "\n\t" . ($ue_in_idle ? '' : '!') . sprintf("idle, tac=0x%04x, global_cell=0x%08x, earfcn=%d, serving_cell=%d, %d/%d/%d/%d", $tac, $global_cell_id, $earfcn, $serving_cell_id,
+	$cell_resel_priority, $s_non_intra_search, $thresh_serving_low, $s_intra_search);
+    for (my $i = 0; $i < $cells_len; $i++) {
+	$ret .= "\n\t\t" . &_decode_lte_pci_data(@r[$i*10..$i*10+9]);
+    }
+    return $ret;
+}
+
+sub tlv_lte_interfreq {
+    my @data = @{shift()};
+    my $ue_in_idle = shift(@data);
+    my $freqs_len = shift(@data);
+    my $ret = '';
+    for (my $i = 0; $i < $freqs_len; $i++) {
+	my $earfcn = unpack("v", pack("C2", shift(@data), shift(@data)));
+	my $threshX_low = shift(@data);
+	my $threshX_high = shift(@data);
+	my $cell_resel_priority = shift(@data);
+	my $cells_len = shift(@data);
+	$ret .= "\n\t" . ($ue_in_idle ? '' : '!') . sprintf("idle, earfcn=%d, %d/%d/%d", $earfcn, $threshX_low, $threshX_high, $cell_resel_priority);
+	for (my $i = 0; $i < $cells_len; $i++) {
+	    $ret .= "\n\t\t" . &_decode_lte_pci_data(@data[$i*10..$i*10+9]);
+	}
+	@data = @data[$cells_len*10..$#data];
+    }
+    return $ret;
+}
+
+sub _decode_lte_gsm_data {
+    my @data = @_;
+    my ($arfcn, $band_1900, $cell_id_valid, $bsic_id, $rssi, $srxlev) = unpack("vCCCs<s<", pack("C*", @data));
+    return sprintf("arfcn=%d, %s, cell id %svalid, bsic=0x%02x, rssi=%d dB srxlev=%d", $arfcn, $band_1900 ? '1900' : '1800', $cell_id_valid ? '' : 'in', $rssi/10, $srxlev);
+}
+
+sub tlv_lte_neigh_gsm {
+    my @data = @{shift()};
+    my $ue_in_idle = shift(@data);
+    my $freqs_len = shift(@data);
+    my $ret = '';
+    for (my $i = 0; $i < $freqs_len; $i++) {
+	my $cell_resel_priority = shift(@data);
+	my $thresh_gsm_high = shift(@data);
+	my $thresh_gsm_low = shift(@data);
+	my $ncc_permitted = shift(@data);
+	my $cells_len = shift(@data);
+	$ret .= "\n\t" . ($ue_in_idle ? '' : '!') . sprintf("idle, %d/%d/%d, ncc=0x%02x", $thresh_gsm_low, $thresh_gsm_high, $cell_resel_priority, $ncc_permitted);
+	for (my $i = 0; $i < $cells_len; $i++) {
+	    $ret .= "\n\t\t" . &_decode_lte_gsm_data(@data[$i*9..$i*9+8]);
+	}
+	@data = @data[$cells_len*9..$#data];
+     }
+    return $ret;
+}
+
+sub _decode_lte_wcdma_data {
+    my @data = @_;
+    my ($psc, $cpich_rscp, $cpich_ecno, $srxlev) = unpack("vs<s<s<", pack("C*", @data));
+    return sprintf("psc=%d, RSCP=%d dBm, Ec/No=%d dB, srxlev=%d", $psc, $cpich_rscp/10, $cpich_ecno/10, $srxlev);
+}
+
+sub tlv_lte_neigh_wcdma {
+    my @data = @{shift()};
+    my $ue_in_idle = shift(@data);
+    my $freqs_len = shift(@data);
+    my $ret = '';
+    for (my $i = 0; $i < $freqs_len; $i++) {
+	my $uarfcn = unpack("v", pack("C2", shift(@data), shift(@data)));
+	my $cell_resel_priority = shift(@data);
+	my $threshX_high = unpack("v", pack("C2", shift(@data), shift(@data)));
+	my $threshX_low = unpack("v", pack("C2", shift(@data), shift(@data)));
+	my $cells_len = shift(@data);
+	$ret .= "\n\t" . ($ue_in_idle ? '' : '!') . sprintf("idle, uarfcn=%d, %d/%d/%d", $uarfcn, $threshX_low, $threshX_high, $cell_resel_priority);
+	for (my $i = 0; $i < $cells_len; $i++) {
+	    $ret .= "\n\t\t" . &_decode_lte_wcdma_data(@data[$i*8..$i*8+7]);
+	}
+	@data = @data[$cells_len*8..$#data];
+    }
+    return $ret;
 }
 
 sub tlv {
