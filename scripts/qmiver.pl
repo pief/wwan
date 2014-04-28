@@ -66,28 +66,39 @@ $dev->open();
 # get the number of configs
 my @cfgs = @{$dev->config()};
 
-# select the last one??
-my $cfg = pop(@cfgs);
 
-# cannot use ifnum as array idx as the numbering may not be consecutive...
-my @intflist = grep { !$opt{'if'} || $_->[0]->bInterfaceNumber == $opt{'if'} } @{$cfg->interfaces()};
-warn Dumper(\@intflist) if $opt{'debug'};
+# cycle trough all of them:
+for my $cfg (@cfgs) {
+    my $cfgno = $cfg->bConfigurationValue;
+    warn "Configuration number $cfgno\n";
 
-foreach (@intflist) {
-    my $intf = $_->[0];
+    # unbind all drivers prior to set_configuration
+    for my $intf (@{$cfg->interfaces()}) {
+	for my $altf (@$intf) {
+	    &unbind_driver($dev, $altf);
+	}
+    }
+    $dev->set_configuration($cfgno);
+
+    # cannot use ifnum as array idx as the numbering may not be consecutive...
+    my @intflist = grep { !$opt{'if'} || $_->[0]->bInterfaceNumber == $opt{'if'} } @{$cfg->interfaces()};
+    warn Dumper(\@intflist) if $opt{'debug'};
+
+    foreach (@intflist) {
+	my $intf = $_->[0];
   
-    # supported interfaces must have an interrupt endpoint and may have 2 bulk endpoints
-    if (($intf->bNumEndpoints == 3 || $intf->bNumEndpoints == 1) &&
-	($intf->endpoints->[0]->bmAttributes == 3)) {  # USB_ENDPOINT_XFER_INT
-	warn "Candidate: ifnum=", $intf->bInterfaceNumber,"\n";
-	&do_qmi($dev, $intf);
-    } else {
-	warn "Unsupported endpoint configuration on ifnum=", $intf->bInterfaceNumber,"\n";
+        # supported interfaces must have an interrupt endpoint and may have 2 bulk endpoints
+	if (($intf->bNumEndpoints == 3 || $intf->bNumEndpoints == 1) &&
+	    ($intf->endpoints->[0]->bmAttributes == 3)) {  # USB_ENDPOINT_XFER_INT
+	    warn "Candidate: ifnum=", $intf->bInterfaceNumber,"\n";
+	    &do_qmi($dev, $intf);
+	} else {
+	    warn "Unsupported endpoint configuration on ifnum=", $intf->bInterfaceNumber,"\n";
+	}
     }
 }
 
-
-sub do_qmi {
+sub unbind_driver {
     my ($dev, $intf) = @_;
 
     my $ifnum = $intf->bInterfaceNumber;
@@ -99,6 +110,14 @@ sub do_qmi {
 	    return undef;
 	}
     }
+    return 1;
+}
+
+sub do_qmi {
+    my ($dev, $intf) = @_;
+
+    return unless &unbind_driver($dev, $intf);
+    my $ifnum = $intf->bInterfaceNumber;
     my $ret = $dev->claim_interface($ifnum);
     if ($ret < 0) {
 	warn "claim_interface failed ($ret): $!\n";
