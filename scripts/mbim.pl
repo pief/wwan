@@ -23,6 +23,9 @@ my $session = 0;
 my $verbose = 1;
 my $debug = 1;
 
+# internal state
+my $tid = 1;		# transaction id
+
 # sleep and read all rcvd messages?
 my $monitor = 0;
 
@@ -32,6 +35,7 @@ my $mgmt = &strip_quotes($ENV{MGMT}) || "/dev/cdc-wdm0";
 # QMI specifics
 my $qmisys;
 my $qmicid;
+
 
 ### functions used during enviroment variable parsing ###
 sub usage {
@@ -85,6 +89,7 @@ GetOptions(
     'session=i' => \$session,
     'verbose!' => \$verbose,
     'debug!' => \$debug,
+    'tid=i' => \$tid,
 
     'qmisys=s' => \$qmisys,
     'qmicid=i' => \$qmicid,
@@ -96,9 +101,6 @@ GetOptions(
 # network device is required
 &usage unless $mgmt;
 
-# internal state
-my $tid = 1;		# transaction id
-    
 
 ### MBIM helpers ###
 
@@ -417,6 +419,14 @@ sub mk_host_error_msg {
     return $buf;
 }
 
+# Table 10‐62: MBIM_AUTH_PROTOCOL 
+my %authproto = (
+    0 => 'MBIMAuthProtocolNone', 
+    1 => 'MBIMAuthProtocolPap', 
+    2 => 'MBIMAuthProtocolChap',  
+    3 => 'MBIMAuthProtocolMsChapV2',
+    );
+
 # Table 10‐63: MBIM_CONTEXT_IP_TYPE 
 my %iptype = (
 	0 => 'MBIMContextIPTypeDefault',
@@ -545,6 +555,31 @@ sub mk_ipv6_connect {
     return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
 }
 
+sub mk_mms_connect {
+    my ($apn, $activate, $sessionid) = @_;
+    $sessionid ||= 0;
+    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
+    $apn = encode('utf16le', $apn);
+    my $apnlen = length($apn);
+    # create the data buffer:
+    my $data = pack("V11", 
+		    $sessionid, # SessionId  
+		    !!$activate, # ActivationCommand  
+		    60, # AccessStringOffset
+		    $apnlen, # AccessStringSize  
+		    0, # UserNameOffset  
+		    0, # UserNameSize  
+		    0, # PasswordOffset  
+		    0, # PasswordSize  
+		    0, # Compression  
+		    0, # AuthProtocol  
+		    1, # IPType 
+	);
+    my $type = 'MMS';
+    $data .= string_to_uuid($context{"MBIMContextType$type"});
+    $data .= $apn;
+    return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
+}
 
 sub decode_mbim_context {
     my $info = shift;
@@ -904,7 +939,7 @@ sub ipv6_element {
 }
 
 sub decode_basic_connect {
-    my ($cid, $info) = @_;
+    my ($cid, $info, $is_cmd) = @_;
 
     if ($cid == 1) { # MBIM_CID_DEVICE_CAPS
 	my ($type, $class, $voiceclass, $simclass, $dataclass, $smscaps, $ctrlcaps, $maxsessions, $custoff, $custlen, $idoff, $idlen, $fwoff, $fwlen, $hwoff, $hwlen) = unpack("V16", $info);
@@ -962,7 +997,7 @@ sub decode_basic_connect {
 	print "  SignalStrengthInterval:\t$interval\n";
 	print "  RSSIThreshold:\t$rssi\n";
 	print "  ErrorRateThreshold:\t$errorrate\n";
-    } elsif ($cid == 12) { # MBIM_CID_CONNECT
+    } elsif ($cid == 12 && !$is_cmd) { # MBIM_CID_CONNECT
 	my ($id, $state, $voicestate, $iptype)  = unpack("V4", $info);
 	print "  SessionId:\t$id\n";
 	print "  ActivationState:\t$actstate{$state} ($state)\n";
@@ -972,6 +1007,18 @@ sub decode_basic_connect {
 	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
 	my $nwerr = unpack("V", substr($info, 32, 4));
 	print "  NwError:\t$nwerr (", $nwerror{$nwerr} || 'unknown', ")\n";
+    } elsif ($cid == 12 && $is_cmd) { # MBIM_CID_CONNECT
+	my ($id, $actcmd, $apnoff, $apnlen, $useroff, $userlen, $pwoff, $pwlen, $comp, $auth, $iptype)  = unpack("V11", $info);
+	print "  SessionId:\t$id\n";
+	print "  ActivationCommand:\t", $actcmd ? "Activate" : "Deactivate", "\n";
+	print "  AccessString:\t", &utf16_field($info, $apnoff, $apnlen), "\n";
+	print "  UserName:\t", &utf16_field($info, $useroff, $userlen), "\n";
+	print "  Password:\t", &utf16_field($info, $pwoff, $pwlen), "\n";
+	print "  Compression:\t",  $comp ? "Enable" : "None", "\n";
+	print "  AuthProtocol:\t$authproto{$auth} ($auth)\n";
+	print "  IPType:\t$iptype{$iptype} ($iptype)\n";
+	my $type = uuid_to_string(substr($info, 44, 16));
+	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
     } elsif ($cid == 13) { # MBIM_CID_PROVISIONED_CONTEXTS
 	my $ec = unpack("V", $info);
 	print "  ElementCount (EC): $ec\n  ProvisionedContextRefList:\n";
@@ -1476,13 +1523,17 @@ sub decode_mbim {
 	my ($cid, $status, $infolen) = unpack("VVV", substr($msg, 36));
 	my $info = substr($msg, 48);
 	print &cid_to_string($service, $cid), " ($cid)\n";
-	print &status_to_string($status), " ($status)\n";
+	if ($type == 0x80000003) {
+	    print &status_to_string($status), " ($status)\n";
+	} else {
+	    print $status ? 'SET_COMMAND' : 'QUERY_COMMAND', " ($status)\n";
+	}
 	print "InformationBuffer [$infolen]:\n";
 
 	if ($infolen != length($info)) {
 	    print "Fragmented data is not yet supported\n";
 	} elsif (exists($decoder{$service})) {
-	    $decoder{$service}($cid, $info) if $infolen; # Only on success!
+	    $decoder{$service}($cid, $info, $type == 0x00000003) if $infolen; # Only on success!
 	} else {
 	    print "decoding of $service CIDs is not yet supported\n";
 	    printf "%02x " x $infolen, unpack("C*", $info);
@@ -1714,6 +1765,8 @@ if ($cmd eq "open") {
     print F &mk_cid_connect($apn, 1, $session);
 } elsif ($cmd eq "ipv6") {
     print F &mk_ipv6_connect($apn, 1, $session);
+} elsif ($cmd eq "mms") {
+    print F &mk_mms_connect($apn, 1, $session);
 } elsif ($cmd eq "disconnect") {
     print F &mk_cid_connect('', 0, $session);
 } elsif ($cmd eq "attach") {
