@@ -967,6 +967,7 @@ use strict;
 use warnings;
 use Getopt::Long;
 use LWP::Simple;
+use Socket;
 
 my %sysname = (
     0 => "QMI_CTL",
@@ -985,6 +986,7 @@ Usage: $0 [options] --device=<iface> command tlv
 
 Where [options] are
 
+  --proxy
   --family=<4|6>
   --pin=<code>
   --apn=<apn>
@@ -1035,8 +1037,12 @@ my $system = QMI_WDS;
 # sleep and read all rcvd messages?
 my $monitor = 0;
 
+# use qmi-proxy
+my $proxy = 0;
+
 ## let command line override defaults
 GetOptions(
+    'proxy!' => \$proxy,
     'device=s' => \$netdev,
     'family=s' => \$family,
     'pin=s' => \$pin{1},
@@ -1351,7 +1357,12 @@ sub read_match {
 	do {
 	    my $len = 0;
 	    if (!$raw) {
-		$len = sysread(F, $raw, 512);
+		if ($proxy) {
+		    recv(F, $raw, 512, 0);
+		    $len = length($raw);
+		} else {
+		    $len = sysread(F, $raw, 512);
+		}
 		warn("[" . localtime . "] read $len bytes from $dev\n") if ($debug && $len);
 	    } else {
 		$len = length($raw);
@@ -1391,7 +1402,7 @@ sub monitor {
 sub send_and_recv {
     my $cmd = shift;
     my $timeout = shift || 5;
-
+    
     return {} if (!$cmd);
 
     # get cached device, or lookup and cache
@@ -1403,11 +1414,21 @@ sub send_and_recv {
     my $qmi_out = decode_qmi($cmd);
     pretty_print_qmi($qmi_out) if $debug;
 
-    print F $cmd;
-
+    if ($proxy) {
+	send(F, $cmd, 0);
+    } else {
+	print F $cmd;
+    }
+    
     # set up for matching
     $qmi_out->{flags} = $qmi_out->{sys} ? 0x02 : 0x01; # response
     $qmi_out->{ctrl} = 0x80;  # service
+
+    # work around bug in libqmi qmi-proxy implementation
+    if ($proxy && $qmi_out->{'cid'} == 0 && $qmi_out->{'msgid'} == 0xff00) {
+	$qmi_out->{ctrl} = 0x00;
+    }
+
     my $qmi_in = read_match($qmi_out, $timeout);
  
     return $qmi_in;
@@ -2004,8 +2025,19 @@ if (!$dev) {
 }
 
 # open it now and keep it open until exit
-open(F, "+<", $dev) || die "open $dev: $!\n";
-autoflush F 1;
+if ($proxy) {
+    my $addr = sockaddr_un("\x{0}qmi-proxy");
+    socket(F, PF_UNIX, SOCK_STREAM, 0) || die "socket: $!\n";
+    connect(F, $addr) || die "connect: $!\n";
+
+    my $req = mk_qmi(0, 0, 0xff00, {0x01 => $dev});
+    my $ret = send_and_recv($req);
+    warn "$netdev: qmi-proxy open status=" . verify_status($ret) . "\n" if $verbose;
+    die "$netdev: qmi-proxy for $dev failed\n" if (verify_status($ret) != 0);
+} else {
+    open(F, "+<", $dev) || die "open $dev: $!\n";
+    autoflush F 1;
+}
 
 #if (&is_at) {
 #    die "$netdev: no support for AT command $dev yet\n";
@@ -2022,9 +2054,6 @@ $SIG{INT} = \&release_cids;
 
 ##&device_info if $verbose;
 
-# get and verify cached data, so we can reuse the QMI_WDS CID at least
-##&get_wds_state;
-
 # get the command
 my $cmd = shift;
 
@@ -2038,6 +2067,9 @@ if (exists $ENV{'PHASE'}) {
 
 # special command alias handling per system
 if ($system == QMI_WDS) {
+    # get and verify cached data, so we can reuse the QMI_WDS CID at least
+    &get_wds_state;
+
     # start interface?
     if ($cmd eq 'start') {
 #	if (&dms_verify_pin) {
