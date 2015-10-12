@@ -462,11 +462,11 @@ print "Got QMI DMS client ID '$dmscid'\n" if $verbose;
 # always get first.  We need the list of supported settings to allow set
 &do_qmi(0x555b, &mk_qmi(2, $dmscid, 0x555b, {})) || &quit;
 my $current = $lastqmi->{'tlvs'}{0x10}[0];
-my @supported = sort(@{$lastqmi->{'tlvs'}{0x11}});
-my $count = hex(shift(@supported));
+my @supported = @{$lastqmi->{'tlvs'}{0x11}};
+my $count = shift(@supported);
 
 # basic sanity:
-if ($count != $#supported) {
+if ($count != $#supported + 1) {
     print "ERROR: array length mismatch, $count != $#supported\n";
     print to_json(\@supported),"\n";
     &quit;
