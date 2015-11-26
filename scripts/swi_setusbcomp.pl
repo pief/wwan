@@ -197,7 +197,8 @@ sub reader {
     my $timeout = shift || 0;
 
     eval {
-	local $SIG{ALRM} = sub { die "timeout\n" }; # NB: \n required
+	local $SIG{ALRM} = sub { die "timeout\n" };
+	local $SIG{TERM} = sub { die "close\n" };
 	my $raw = '';
 	my $msglen = 0;
 	alarm $timeout;
@@ -542,7 +543,7 @@ sub quit {
 	print F &mk_close_msg;
     } else {
 	# simply signal reader to quit
-	kill 'ALRM', $pid;
+	kill 'TERM', $pid;
     }
 
     # wait for the reader to exit (on CLOSE_DONE)
