@@ -471,7 +471,6 @@ sub type_to_context {
     return $context || '<unknown>';
 }
 
-
 # MBIM_CID_DEVICE_CAPS
 sub mk_cid_device_caps {
     # query - empty data buffer
@@ -504,8 +503,12 @@ sub mk_cid_dss_connect {
 }
 
 sub mk_cid_connect {
-    my ($apn, $activate, $sessionid) = @_;
+    my ($apn, $activate, $sessionid, $iptype, $contexttype) = @_;
     $sessionid ||= 0;
+    $iptype ||= 1; # IPv4
+    $contexttype ||= 'Internet';
+    $contexttype = "MBIMContextType$contexttype";
+    $contexttype = 'MBIMContextTypeNone' unless exists($context{$contexttype});
     warn "Connecting SessionID=$sessionid to \"$apn\"\n";
     $apn = encode('utf16le', $apn);
     my $apnlen = length($apn);
@@ -521,62 +524,9 @@ sub mk_cid_connect {
 		    0, # PasswordSize  
 		    0, # Compression  
 		    0, # AuthProtocol  
-		    1, # IPType  (IPv4)
+		    $iptype, # IPType
 	);
-    my $type = 0 ? 'Vpn' : 'Internet';
-    $data .= string_to_uuid($context{"MBIMContextType$type"});
-    $data .= $apn;
-    return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
-}
-
-sub mk_ipv6_connect {
-    my ($apn, $activate, $sessionid) = @_;
-    $sessionid ||= 0;
-    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
-    $apn = encode('utf16le', $apn);
-    my $apnlen = length($apn);
-    # create the data buffer:
-    my $data = pack("V11", 
-		    $sessionid, # SessionId  
-		    !!$activate, # ActivationCommand  
-		    60, # AccessStringOffset
-		    $apnlen, # AccessStringSize  
-		    0, # UserNameOffset  
-		    0, # UserNameSize  
-		    0, # PasswordOffset  
-		    0, # PasswordSize  
-		    0, # Compression  
-		    0, # AuthProtocol  
-		    2, # IPType  (IPv6)
-	);
-    my $type = 0 ? 'Vpn' : 'Internet';
-    $data .= string_to_uuid($context{"MBIMContextType$type"});
-    $data .= $apn;
-    return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
-}
-
-sub mk_mms_connect {
-    my ($apn, $activate, $sessionid) = @_;
-    $sessionid ||= 0;
-    warn "Connecting SessionID=$sessionid to \"$apn\"\n";
-    $apn = encode('utf16le', $apn);
-    my $apnlen = length($apn);
-    # create the data buffer:
-    my $data = pack("V11", 
-		    $sessionid, # SessionId  
-		    !!$activate, # ActivationCommand  
-		    60, # AccessStringOffset
-		    $apnlen, # AccessStringSize  
-		    0, # UserNameOffset  
-		    0, # UserNameSize  
-		    0, # PasswordOffset  
-		    0, # PasswordSize  
-		    0, # Compression  
-		    0, # AuthProtocol  
-		    1, # IPType 
-	);
-    my $type = 'MMS';
-    $data .= string_to_uuid($context{"MBIMContextType$type"});
+    $data .= string_to_uuid($context{$contexttype});
     $data .= $apn;
     return &mk_command_msg('BASIC_CONNECT', 12, 1, $data);
 }
@@ -919,7 +869,7 @@ sub ipv4_address {
 # Table 10‐103: MBIM_IPV6_ADDRESS 
 sub ipv6_address {
     my $info = shift;
-    my $x = sprintf "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x", unpack("C16", $info);
+    my $x = sprintf join(":", ("%x") x 8), unpack("n8", $info);
     my $ip = new Net::IP ($x);
     return $ip->short();
 }
@@ -939,7 +889,7 @@ sub ipv6_element {
 }
 
 sub decode_basic_connect {
-    my ($cid, $info, $is_cmd) = @_;
+    my ($cid, $info, $set) = @_;
 
     if ($cid == 1) { # MBIM_CID_DEVICE_CAPS
 	my ($type, $class, $voiceclass, $simclass, $dataclass, $smscaps, $ctrlcaps, $maxsessions, $custoff, $custlen, $idoff, $idlen, $fwoff, $fwlen, $hwoff, $hwlen) = unpack("V16", $info);
@@ -997,7 +947,7 @@ sub decode_basic_connect {
 	print "  SignalStrengthInterval:\t$interval\n";
 	print "  RSSIThreshold:\t$rssi\n";
 	print "  ErrorRateThreshold:\t$errorrate\n";
-    } elsif ($cid == 12 && !$is_cmd) { # MBIM_CID_CONNECT
+    } elsif ($cid == 12 && !$set) { # MBIM_CID_CONNECT
 	my ($id, $state, $voicestate, $iptype)  = unpack("V4", $info);
 	print "  SessionId:\t$id\n";
 	print "  ActivationState:\t$actstate{$state} ($state)\n";
@@ -1007,7 +957,7 @@ sub decode_basic_connect {
 	print "  ContextType:\t$type (", &type_to_context($type), ")\n"; 
 	my $nwerr = unpack("V", substr($info, 32, 4));
 	print "  NwError:\t$nwerr (", $nwerror{$nwerr} || 'unknown', ")\n";
-    } elsif ($cid == 12 && $is_cmd) { # MBIM_CID_CONNECT
+    } elsif ($cid == 12 && $set) { # MBIM_CID_CONNECT
 	my ($id, $actcmd, $apnoff, $apnlen, $useroff, $userlen, $pwoff, $pwlen, $comp, $auth, $iptype)  = unpack("V11", $info);
 	print "  SessionId:\t$id\n";
 	print "  ActivationCommand:\t", $actcmd ? "Activate" : "Deactivate", "\n";
@@ -1033,26 +983,42 @@ sub decode_basic_connect {
 	print "  SessionId:\t$id\n";
 	printf "  IPv4ConfigurationAvailable:\t0x%08x %s\n", $ipv4cfg, &flags_to_class($ipv4cfg, \%ipcfg);
 	printf "  IPv6ConfigurationAvailable:\t0x%08x %s\n", $ipv6cfg, &flags_to_class($ipv6cfg, \%ipcfg);
-	print "  IPv4AddressCount:\t$ipv4c\n";
-	for (my $i = 0; $i < $ipv4c; $i++) {
-	    print "    ", &ipv4_element(substr($info, $ipv4o + $i * 8, 8)), "\n";
+	if ($ipv4cfg &  0x01) { # address
+	    print "  IPv4AddressCount:\t$ipv4c\n";
+	    for (my $i = 0; $i < $ipv4c; $i++) {
+		print "    ", &ipv4_element(substr($info, $ipv4o + $i * 8, 8)), "\n";
+	    }
 	}
-	print "  IPv6AddressCount:\t$ipv6c\n";
-	for (my $i = 0; $i < $ipv6c; $i++) {
-	    print "    ", &ipv6_element(substr($info, $ipv6o + $i * 20, 20)), "\n";
+	if ($ipv6cfg & 0x01) { # address
+	    print "  IPv6AddressCount:\t$ipv6c\n";
+	    for (my $i = 0; $i < $ipv6c; $i++) {
+		print "    ", &ipv6_element(substr($info, $ipv6o + $i * 20, 20)), "\n";
+	    }
 	}
-	print "  IPv4Gateway:\t", &ipv4_address(substr($info, $ipv4gw, 4)), "\n";
-	print "  IPv6Gateway:\t", &ipv6_address(substr($info, $ipv6gw, 16)), "\n";
-	print "  IPv4DnsServerCount:\t$ipv4dnsc\n";
-	for (my $i = 0; $i < $ipv4dnsc; $i++) {
-	    print "    ", &ipv4_address(substr($info, $ipv4dnso + $i * 4, 4)), "\n";
+	if ($ipv4cfg & 0x02) { # gateway
+	    print "  IPv4Gateway:\t", &ipv4_address(substr($info, $ipv4gw, 4)), "\n";
 	}
-	print "  IPv6DnsServerCount:\t$ipv6dnsc\n";
-	for (my $i = 0; $i < $ipv6dnsc; $i++) {
-	    print "    ", &ipv6_address(substr($info, $ipv6dnso + $i * 16, 16)), "\n";
+	if ($ipv6cfg & 0x02) { # gateway
+	    print "  IPv6Gateway:\t", &ipv6_address(substr($info, $ipv6gw, 16)), "\n";
 	}
-	print "  IPv4Mtu:\t$ipv4mtu\n";
-	print "  IPv6Mtu:\t$ipv6mtu\n";
+	if ($ipv4cfg & 0x04) { # dns
+	    print "  IPv4DnsServerCount:\t$ipv4dnsc\n";
+	    for (my $i = 0; $i < $ipv4dnsc; $i++) {
+		print "    ", &ipv4_address(substr($info, $ipv4dnso + $i * 4, 4)), "\n";
+	    }
+	}
+	if ($ipv6cfg & 0x04) { # dns
+	    print "  IPv6DnsServerCount:\t$ipv6dnsc\n";
+	    for (my $i = 0; $i < $ipv6dnsc; $i++) {
+		print "    ", &ipv6_address(substr($info, $ipv6dnso + $i * 16, 16)), "\n";
+	    }
+	}
+	if ($ipv4cfg & 0x08) { # mtu
+	    print "  IPv4Mtu:\t$ipv4mtu\n";
+	}
+	if ($ipv6cfg & 0x08) { # mtu
+	    print "  IPv6Mtu:\t$ipv6mtu\n";
+	}
     } elsif ($cid == 16) { # MBIM_CID_DEVICE_SERVICES
 	my ($dsc, $max) = unpack("VV", $info);
 	print "  DeviceServicesCount (DSC):\t$dsc\n";
@@ -1533,7 +1499,7 @@ sub decode_mbim {
 	if ($infolen != length($info)) {
 	    print "Fragmented data is not yet supported\n";
 	} elsif (exists($decoder{$service})) {
-	    $decoder{$service}($cid, $info, $type == 0x00000003) if $infolen; # Only on success!
+	    $decoder{$service}($cid, $info, $type == 0x00000003 && $status) if $infolen; # Only on success!
 	} else {
 	    print "decoding of $service CIDs is not yet supported\n";
 	    printf "%02x " x $infolen, unpack("C*", $info);
@@ -1732,7 +1698,7 @@ my $cmd = shift;
 # decode an message from the command line
 # e.g. 01:00:00:80:10:00:00:00:01:00:00:00:00:00:00:00
 if ($cmd eq "offline") {
-    &decode_mbim(pack("C*", map { hex } split(/:/, shift)));
+    &decode_mbim(pack("C*", map { hex } split(/:/, join(':', @ARGV))));
     exit(0);
 }
 
@@ -1762,11 +1728,13 @@ if ($cmd eq "open") {
 } elsif ($cmd eq "pin") {
     print F &mk_cid_pin($pin{1}) if $pin{1};
 } elsif ($cmd eq "connect") {
-    print F &mk_cid_connect($apn, 1, $session);
+    print F &mk_cid_connect($apn, 1, $session, @ARGV);
 } elsif ($cmd eq "ipv6") {
-    print F &mk_ipv6_connect($apn, 1, $session);
+    print F &mk_cid_connect($apn, 1, $session, 2, 'Internet');
+} elsif ($cmd eq "ipv4v6") {
+    print F &mk_cid_connect($apn, 1, $session, 3, 'Internet');
 } elsif ($cmd eq "mms") {
-    print F &mk_mms_connect($apn, 1, $session);
+    print F &mk_cid_connect($apn, 1, $session, 1, 'MMS');
 } elsif ($cmd eq "disconnect") {
     print F &mk_cid_connect('', 0, $session);
 } elsif ($cmd eq "attach") {
