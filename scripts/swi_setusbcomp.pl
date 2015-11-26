@@ -19,11 +19,13 @@ my $verbose = 1;
 my $usbcomp;
  
 # a few global variables
-my $lastmbim = 0;
-my $lastqmi;
+my $msgs;
 my $dmscid;
 my $tid = 1;
-    
+
+# defaulting to MBIM mode
+my $mbim = 1;
+
 GetOptions(
     'usbcomp=i' => \$usbcomp,
     'device=s' => \$mgmt,
@@ -157,6 +159,8 @@ sub decode_mbim {
     if ($type == 0x80000001 || $type == 0x80000002) { # MBIM_OPEN_DONE ||  MBIM_CLOSE_DONE 
 	my $status = unpack("V", substr($msg, 12));
 	printf "  Status:\t0x%08x\n", $status if $debug;
+	# save message type
+	push(@$msgs, { status => $type, index => scalar @$msgs, });
     } elsif ($type == 0x80000003) { # MBIM_COMMAND_DONE 
 	my ($total, $current) = unpack("VV", substr($msg, 12)); # FragmentHeader  
 	if ($debug) {
@@ -179,23 +183,21 @@ sub decode_mbim {
 	    print "Fragmented MBIM transactions are not supported\n";
 	} elsif ($service eq "EXT_QMUX") {
 	    # save the decoded QMI message
-	    $lastqmi = &decode_qmi($info);
+	    my $lastqmi = &decode_qmi($info);
+	    # save message
+	    push(@$msgs, { status => 0, index => scalar @$msgs, qmi => $lastqmi}) if $lastqmi;
 	}
 	# silently ignoring InformationBuffer payload of other services
     }
     # ignoring all other types of MBIM messages
-    
-    # save message type
-    $lastmbim = $type;   
 }
 
 # read from F until timeout
-sub read_mbim {
+sub reader {
     my $timeout = shift || 0;
-    my $found = undef;
 
     eval {
-	local $SIG{ALRM} = sub { die "alarm\n" }; # NB: \n required
+	local $SIG{ALRM} = sub { die "timeout\n" }; # NB: \n required
 	my $raw = '';
 	my $msglen = 0;
 	alarm $timeout;
@@ -207,29 +209,39 @@ sub read_mbim {
 		if ($n) {
 		    $len = $n;
 		    $raw = $tmp;
-		    printf "MBIM<: " . "%02x " x $n . "\n", unpack("C*", $tmp) if $debug;
+		    printf "%s<: " . "%02x " x $n . "\n", $mbim ? "MBIM" : "QMI", unpack("C*", $tmp) if $debug;
 		} else {
-		    $found = 1;
+		    die "eof\n";
 		}
 	    }
 
 	    # get expected message length
-	    $msglen = unpack("V", substr($raw, 4, 4));
+	    if ($mbim) {
+		$msglen = unpack("V", substr($raw, 4, 4));
+	    } else {
+		$msglen = unpack("v", substr($raw, 1, 2)) + 1;
+	    }
 
 	    if ($len >= $msglen) {
 		$len -= $msglen;
-		&decode_mbim(substr($raw, 0, $msglen));
+
+		if ($mbim) {
+		    &decode_mbim(substr($raw, 0, $msglen));
+		    die "close\n" if (grep { $_->{status} == 0x80000002 } @$msgs); # exit on CLOSE_DONE
+		} else {
+		    my $lastqmi = &decode_qmi(substr($raw, 0, $msglen));
+		    push(@$msgs, { status => 0, index => scalar @$msgs, qmi => $lastqmi}) if $lastqmi;
+		}
 		$raw = substr($raw, $msglen);
 		$msglen = 0;
-		$found = 1;
 	    } else {
 		warn "$len < $msglen\n";
 	    }
-	} while (!$found);
+	} while (1);
 	alarm 0;
     };
     if ($@) {
-	die unless $@ =~ /^alarm/;   # propagate unexpected errors
+	die unless $@ =~ /^close/;   # propagate unexpected errors
     }
 }
 
@@ -285,7 +297,7 @@ sub decode_qmi {
     my $packet = shift;
     return {} unless $packet;
 
-    printf "%02x " x length($packet) . "\n", unpack("C*", $packet) if $debug;
+    #    printf "%02x " x length($packet) . "\n", unpack("C*", $packet) if $debug;
 
     my $ret = {};
     @$ret{'tf','len','ctrl','sys','cid'} = unpack("CvCCC", $packet);
@@ -330,18 +342,29 @@ sub qmiok {
 sub do_qmi {
     my $msgid = shift;
     my $qmi = shift;
-
+    my $timeout = shift || 15;
+    
     printf "QMI>: " . "%02x " x length($qmi) . "\n", unpack("C*", $qmi) if $debug;
-    print F &mk_command_msg('EXT_QMUX', 1, 1, $qmi);
-    my $count = 5; # seconds timeout
-    while (!($lastmbim == 0x80000003 && ref($lastqmi) && ($lastqmi->{'msgid'} == $msgid))) {
-	sleep(1);
-	return undef if (!$count--); # timeout
+
+    if ($mbim) {
+	print F &mk_command_msg('EXT_QMUX', 1, 1, $qmi);
+    } else {
+	print F $qmi;
     }
-    my $status = &qmiok($lastqmi);
+    my $count = $timeout; # seconds timeout
+    my $msg;
+
+    # wait for a reply, leaving all messages in the queue
+    for (my $i = $timeout; $i > 0; $i--) {
+	($msg) = grep { !$_->{status} && $_->{qmi}->{msgid} == $msgid } @$msgs;
+	last if $msg;
+	sleep(1);
+    }
+    return unless $msg;
+    
+    my $status = &qmiok($msg->{qmi});
     printf "QMI msg '0x%04x' returned status = $status\n", $msgid if $verbose;
-    print to_json($lastqmi) if ($debug && !$status);
-    return $status;
+    return $status ? $msg->{qmi} : undef;
 }
 
 
@@ -374,11 +397,18 @@ my %comps = (
 
 ### main ###
 
+
 # verify that the $mgmt device is a chardev provided by the cdc_mbim driver
 my ($mode, $rdev) = (stat($mgmt))[2,6];
 die "'$mgmt' is not a character device\n" unless S_ISCHR($mode);
 my $driver = basename(readlink(sprintf("/sys/dev/char/%u:%u/device/driver", $rdev >> 8, $rdev & 0xff)));
-die "'$mgmt' is provided by '$driver' - only MBIM devices are supported\n" unless ($driver eq "cdc_mbim");
+if ($driver eq "qmi_wwan") {
+    $mbim = undef;
+} elsif ($driver ne "cdc_mbim") {
+    die "'$mgmt' is provided by '$driver' - only MBIM or QMI devices are supported\n";
+}
+
+print "Running in ", $mbim ? "MBIM" : "QMI", " mode (driver=$driver)\n";
 
 # open device now and keep it open until exit
 open(F, "+<", $mgmt) || die "open $mgmt: $!\n";
@@ -400,19 +430,10 @@ print "MaxMessageSize=$maxctrl\n"  if $debug;
 # fork the reader
 my $pid = fork();
 if ($pid == 0) { # child
-
-    # allow writer to see the last MBIM message
-    tie $lastmbim, 'IPC::Shareable', 'mbim', { create => 1, destroy => 0 } || die "tie failed\n";
-    tie $lastqmi, 'IPC::Shareable', 'qmi', { create => 1, destroy => 0 } || die "tie failed\n";
-
-    # reset to avoid inheriting old values...
-    $lastmbim = 0;
-
-    # loop until CLOSE_DONE...
-    while ($lastmbim != 0x80000002) {
-	&read_mbim(60);
-    }
-    $lastmbim = 0x80000002; # in case of timeout...
+    # shared rx message queue
+    tie $msgs, 'IPC::Shareable', 'msgs', { create => 1, destroy => 0 } || die "tie failed\n";
+    $msgs = [];
+    &reader(60); # allow up to 60 seconds for the whole transaction
     print "exiting reader\n" if $debug;
     exit 0;
 } elsif (!$pid) {
@@ -420,32 +441,35 @@ if ($pid == 0) { # child
 }
 
 # watch reader status
-tie $lastmbim, 'IPC::Shareable', 'mbim', { create => 1, destroy => 1 } || die "tie failed\n";
-tie $lastqmi, 'IPC::Shareable', 'qmi', { create => 1, destroy => 1 } || die "tie failed\n";
+tie $msgs, 'IPC::Shareable', 'msgs', { create => 1, destroy => 1 } || die "tie failed\n";
+$msgs = [];
 
-# reset to avoid inheriting old values...
-$lastmbim = 0;
+if ($mbim) {
+    # send OPEN and wait until reader has seen the OPEN_DONE message
+    print F &mk_open_msg;
 
-# send OPEN and wait until reader has seen the OPEN_DONE message
-print F &mk_open_msg;
-
-# wait for OPEN_DONE
-while ($lastmbim != 0x80000001) {
-    sleep(1);
+    # flushing all messages until OPEN_DONE
+    while (!grep { $_->{status} == 0x80000001 } @$msgs) {
+	$msgs = [];
+	sleep(1);
+    }
+    print "MBIM OPEN succeeded\n" if $verbose;
 }
-print "MBIM OPEN succeeded\n" if $verbose;
+
+my $lastqmi;
 
 # verify QMI channel support with QMI_CTL_MESSAGE_GET_VERSION_INFO
-unless (&do_qmi(0x0021, &mk_qmi(0, 0, 0x0021, { 0x01 => pack("C", 255), }))) {
-    print "Failed to verify QMI vendor specific MBIM service\n";
+unless ($lastqmi = &do_qmi(0x0021, &mk_qmi(0, 0, 0x0021, { 0x01 => pack("C", 255), }))) {
+    print "Failed to verify QMI ", $mbim ? "vendor specific MBIM service" : "", "\n";
     &quit;
 }
-print "MBIM QMI support verified\n";
+print $mbim ? "MBIM " : "", "QMI support verified\n";
+
 &qmiver($lastqmi) if $verbose;
 
 # allocate a DMS CID (or just reuse the one allocated by the MBIM firmware application?)
 # QMI_CTL_GET_CLIENT_ID, TLV 0x01 => 2 (DMS)
-unless (&do_qmi(0x0022, &mk_qmi(0, 0, 0x0022, { 0x01 => pack("C", 2), }))) {
+unless ($lastqmi = &do_qmi(0x0022, &mk_qmi(0, 0, 0x0022, { 0x01 => pack("C", 2), }))) {
     print "Failed to get QMI DMS client ID\n";
     &quit;
 }
@@ -460,7 +484,8 @@ print "Got QMI DMS client ID '$dmscid'\n" if $verbose;
 # wait for response and decode
 
 # always get first.  We need the list of supported settings to allow set
-&do_qmi(0x555b, &mk_qmi(2, $dmscid, 0x555b, {})) || &quit;
+$lastqmi = &do_qmi(0x555b, &mk_qmi(2, $dmscid, 0x555b, {}));
+&quit unless $lastqmi;
 my $current = $lastqmi->{'tlvs'}{0x10}[0];
 my @supported = @{$lastqmi->{'tlvs'}{0x11}};
 my $count = shift(@supported);
@@ -471,7 +496,6 @@ if ($count != $#supported + 1) {
     print to_json(\@supported),"\n";
     &quit;
 }
-
 
 &quit unless (grep { $current == $_ } @supported); # verify that the current comp is supported
 
@@ -513,13 +537,22 @@ sub quit {
 	&do_qmi(0x0023, &mk_qmi(0, 0, 0x0023, { 0x01 =>  pack("C*", 2, $dmscid)}));
     }
 
-    # send CLOSE
-    print F &mk_close_msg;
+    if ($mbim) {
+	# send CLOSE
+	print F &mk_close_msg;
+    } else {
+	# simply signal reader to quit
+	kill 'ALRM', $pid;
+    }
 
     # wait for the reader to exit (on CLOSE_DONE)
     waitpid($pid, 0);
 
     close(F);
+
+    # dump all messages received
+    print Dumper($msgs) if $debug;
+    
     exit 0; # will exit parent
 }
     
@@ -528,7 +561,7 @@ sub usage {
 Usage: $0 [options]  
 
 Where [options] are
-  --device=<mbimdev>    use <mbimdev> (default: '$mgmt')
+  --device=<dev>        use <dev> for MBIM or QMI commands (default: '$mgmt')
   --usbcomp=<num>	change USB composition setting
   --debug		enable verbose debug output
   --help		this help text
