@@ -11,6 +11,7 @@ use constant {
     QMI_NAS => 0x03,
     QMI_WMS => 0x05,
     QMI_PDS => 0x06,
+    QMI_UIM => 0x0B,
     QMI_LOC => 0x10,
 };
 
@@ -976,6 +977,7 @@ my %sysname = (
     3 => "QMI_NAS",
     5 => "QMI_WMS",
     6 => "QMI_PDS",
+    0xB => "QMI_UIM",
     0x10 => "QMI_LOC",
     );
 
@@ -1317,7 +1319,7 @@ sub pretty_print_qmi {
 	my $txt;
 	
 	# special casing status
-	if ($k == 0x02) {
+	if ($k == 0x02 && $qmi->{ctrl} == 0x80) {
 	    $txt = ($v->[0] ? "FAILURE" : "SUCCESS") . " - " . $err{unpack("v", pack("C*", @$v[2..3]))};
 	} elsif ($qmi->{sys} == QMI_WDS) {
 	    $txt = QMI::WDS::tlv($qmi->{msgid}, $k, $v);
@@ -1563,6 +1565,13 @@ sub mk_pds {
     return &mk_qmi(QMI_PDS, $cid, @_);
 }
 
+# QMI User Identity Module Spec (QMI_UIM)
+sub mk_uim {
+    my $cid = &get_cid(QMI_UIM);
+    return undef if (!$cid);
+    return &mk_qmi(QMI_UIM, $cid, @_);
+}
+    
 my %srvc_status = (
     1 => "DISCONNECTED",
     2 => "CONNECTED",
@@ -1722,6 +1731,32 @@ sub dms_verify_pin {
     return $pinok{1};  # we only really care about PIN1
 }
 
+# alternate PIN verification for newer firmwares
+sub uim_verify_pin {
+    my $pinnumber = shift;
+
+    unless ($pin{$pinnumber}) {
+	warn "$netdev: No PIN$pinnumber configured\n" if $verbose;
+	return undef;
+    }
+    my $pin = $pin{$pinnumber};
+
+    my $req = &mk_uim(0x0026,  # QMI_UIM_VERIFY_PIN
+		      { 0x01 => pack("C*", 0,  # Primary GW provisioning
+				           0), # no AID elements
+			0x02 => pack("C*", $pinnumber, length($pin)) . $pin});
+
+    my $ret = &send_and_recv($req);
+    my $status = &verify_status($ret);
+    if ($status) {
+	warn "$netdev: PIN verfication failed: $err{$status}\n";
+	if ($status == 0x0003) { # QMI_ERR_INTERNAL
+	    warn "$netdev: SIM card missing?\n";
+	}
+	return undef;
+    }
+    return 1;
+}
 
 
 sub dms_dump_msg {
@@ -2124,6 +2159,10 @@ if ($system == QMI_WDS) {
 	if ($mode == 1 || $mode == 2 || $mode == 3 ) {
 	    &ctl_set_data_format($mode, shift);
 	}
+    }
+} elsif ($system == QMI_UIM) {
+    if ($cmd eq 'pin') {
+	&uim_verify_pin(1);
     }
 } elsif ($system == QMI_PDS) {
     if ($cmd eq 'xtra') {
