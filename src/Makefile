@@ -2,7 +2,7 @@ CC=gcc
 CFLAGS_FUSE=$(shell pkg-config fuse --cflags)
 LDLIBS_FUSE=$(shell pkg-config fuse --libs)
 LDFLAGS=-Wall
-BINARIES=wwan_ctl qcqmifs
+BINARIES=wwan_ctl qcqmifs flush-wdm
 CFLAGS_USB=$(shell pkg-config libusb-1.0 --cflags)
 LDLIBS_USB=$(shell pkg-config libusb-1.0 --libs)
 
@@ -25,3 +25,9 @@ qcqmifs: qcqmifs.c
 
 cuseqmi: cuseqmi.c
 	$(CC) $(CFLAGS) $(CFLAGS_FUSE) $(LDFLAGS) -lpthread -o $@ $^ $(LDLIBS) $(LDLIBS_FUSE)
+
+swi-firmware: swi-firmware.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+flush-wdm: flush-wdm.c
+	$(CC) $(CFLAGS_USB) $(LDFLAGS) -o $@ $^ $(LDLIBS_USB)
