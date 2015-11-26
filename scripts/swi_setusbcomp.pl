@@ -11,6 +11,7 @@ use IPC::Shareable;
 use Fcntl ':mode';
 use File::Basename;
 use JSON;
+use Time::HiRes qw (sleep);
 
 my $maxctrl = 4096; # default, will be overridden by ioctl if supported
 my $mgmt = "/dev/cdc-wdm0";
@@ -352,14 +353,14 @@ sub do_qmi {
     } else {
 	print F $qmi;
     }
-    my $count = $timeout; # seconds timeout
+    my $count = 10 * $timeout; # seconds timeout
     my $msg;
 
     # wait for a reply, leaving all messages in the queue
     for (my $i = $timeout; $i > 0; $i--) {
 	($msg) = grep { !$_->{status} && $_->{qmi}->{msgid} == $msgid } @$msgs;
 	last if $msg;
-	sleep(1);
+	sleep(0.1);
     }
     return unless $msg;
     
