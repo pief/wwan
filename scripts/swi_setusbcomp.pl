@@ -15,6 +15,7 @@ use Time::HiRes qw (sleep);
 
 my $maxctrl = 4096; # default, will be overridden by ioctl if supported
 my $mgmt = "/dev/cdc-wdm0";
+my $reset;
 my $debug;
 my $verbose = 1;
 my $usbcomp;
@@ -30,6 +31,7 @@ my $mbim = 1;
 GetOptions(
     'usbcomp=i' => \$usbcomp,
     'device=s' => \$mgmt,
+    'reset!' => \$reset,
     'debug!' => \$debug,
     'verbose!' => \$verbose,
     'help|h|?' => \&usage,
@@ -605,6 +607,11 @@ if (!&do_qmi(0x555c, &mk_qmi(2, $dmscid, 0x555c, { 0x01 => pack("C", $usbcomp)})
 
 sub quit {
     if ($dmscid) {
+	# reset device? DMS_SET_OPERATING_MODE => RESET
+	if ($reset) {
+	    &do_qmi(0x0023, &mk_qmi(2, $dmscid, 0x002e, { 0x01 =>  pack("C", 4)}));
+	}
+
 	# release DMS CID
 	# QMI_CTL_RELEASE_CLIENT_ID
 	&do_qmi(0x0023, &mk_qmi(0, 0, 0x0023, { 0x01 =>  pack("C*", 2, $dmscid)}));
@@ -636,6 +643,7 @@ Usage: $0 [options]
 Where [options] are
   --device=<dev>        use <dev> for MBIM or QMI commands (default: '$mgmt')
   --usbcomp=<num>	change USB composition setting
+  --reset		issue a QMI reset request
   --debug		enable verbose debug output
   --help		this help text
 
