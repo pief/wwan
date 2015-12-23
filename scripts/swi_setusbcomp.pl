@@ -248,35 +248,107 @@ sub reader {
 }
 
 ### QMI helpers ###
+
 my %sysname = (
-    0    => "QMI_CTL",
-    1    => "QMI_WDS",
-    2    => "QMI_DMS",
-    3    => "QMI_NAS",
-    4    => "QMI_QOS",
-    5    => "QMI_WMS",
-    6    => "QMI_PDS",
-    7    => "QMI_AUTH",
-    8    => "QMI_AT",
-    9    => "QMI_VOICE",
-    0xa  => "QMI_CAT2",
-    0xb  => "QMI UIM",
-    0xc  => "QMI PBM",
-    0xe  => "QMI RMTFS",
-    0x10 => "QMI_LOC",
-    0x11 => "QMI_SAR",
-    0x14 => "QMI_CSD",
-    0x15 => "QMI_EFS",
-    0x17 => "QMI_TS",
-    0x18 => "QMI_TMD",
-    0x1a => "QMI_WDA",
-    0x1e => "QMI_QCMAP",
-    0x24 => "QMI_PDC",
-    0xe0 => "QMI_CAT", # duplicate!
-    0xe1 => "QMI_RMS",
-    0xe2 => "QMI_OMA",
+	0x00 => "QMI_CTL",	# Control service
+	0x01 => "QMI_WDS",	# Wireless data service
+	0x02 => "QMI_DMS",	# Device management service
+	0x03 => "QMI_NAS",	# Network access service
+	0x04 => "QMI_QOS",	# Quality of service, err, service 
+	0x05 => "QMI_WMS",	# Wireless messaging service
+	0x06 => "QMI_PDS",	# Position determination service
+	0x07 => "QMI_AUTH",	# Authentication service
+	0x08 => "QMI_AT",	# AT command processor service
+	0x09 => "QMI_VOICE",	# Voice service
+	0x0a => "QMI_CAT2",	# Card application toolkit service (new)
+	0x0b => "QMI_UIM",	# UIM service
+	0x0c => "QMI_PBM",	# Phonebook service
+	0x0d => "QMI_QCHAT",	# QCHAT Service
+	0x0e => "QMI_RMTFS",	# Remote file system service
+	0x0f => "QMI_TEST",	# Test service
+	0x10 => "QMI_LOC",	# Location service 
+	0x11 => "QMI_SAR",	# Specific absorption rate service
+	0x12 => "QMI_IMSS",	# IMS settings service
+	0x13 => "QMI_ADC",	# Analog to digital converter driver service
+	0x14 => "QMI_CSD",	# Core sound driver service
+	0x15 => "QMI_MFS",	# Modem embedded file system service
+	0x16 => "QMI_TIME",	# Time service
+	0x17 => "QMI_TS",	# Thermal sensors service
+	0x18 => "QMI_TMD",	# Thermal mitigation device service
+	0x19 => "QMI_SAP",	# Service access proxy service
+	0x1a => "QMI_WDA",	# Wireless data administrative service
+	0x1b => "QMI_TSYNC",	# TSYNC control service 
+	0x1c => "QMI_RFSA",	# Remote file system access service
+	0x1d => "QMI_CSVT",	# Circuit switched videotelephony service
+	0x1e => "QMI_QCMAP",	# Qualcomm mobile access point service
+	0x1f => "QMI_IMSP",	# IMS presence service
+	0x20 => "QMI_IMSVT",	# IMS videotelephony service
+	0x21 => "QMI_IMSA",	# IMS application service
+	0x22 => "QMI_COEX",	# Coexistence service
+	0x23 => "QMI_RESERVED_35",	# Reserved
+	0x24 => "QMI_PDC",	# Persistent device configuration service
+	0x25 => "QMI_RESERVED_37",	# Reserved
+	0x26 => "QMI_STX",	# Simultaneous transmit service
+	0x27 => "QMI_BIT",	# Bearer independent transport service
+	0x28 => "QMI_IMSRTP",	# IMS RTP service
+	0x29 => "QMI_RFRPE",	# RF radiated performance enhancement service
+	0x2a => "QMI_DSD",	# Data system determination service
+	0x2b => "QMI_SSCTL",	# Subsystem control service
+	0xe0 => "QMI_CAT",	# Card application toolkit service
+	0xe1 => "QMI_RMS",	# Remote management service
     );
 
+# dumped from GobiAPI_2013-07-31-1347/GobiConnectionMgmt/GobiConnectionMgmtAPIEnums.h
+# using
+# perl -e 'while (<>){ if (m!eQMI_SVC_([^,]*),\s*//\s*(\d+)\s(.*)!) { my $svc = $1; $svc = "CTL" if ($svc eq "CONTROL"); my $num = $2; my $descr = $3; printf "\t0x%02x => \"$descr\",\n", $num; } }' < /tmp/xx
+my %sysdescr = (
+	0x00 => "Control service",
+	0x01 => "Wireless data service",
+	0x02 => "Device management service",
+	0x03 => "Network access service",
+	0x04 => "Quality of service, err, service ",
+	0x05 => "Wireless messaging service",
+	0x06 => "Position determination service",
+	0x07 => "Authentication service",
+	0x08 => "AT command processor service",
+	0x09 => "Voice service",
+	0x0a => "Card application toolkit service (new)",
+	0x0b => "UIM service",
+	0x0c => "Phonebook service",
+	0x0d => "QCHAT Service",
+	0x0e => "Remote file system service",
+	0x0f => "Test service",
+	0x10 => "Location service ",
+	0x11 => "Specific absorption rate service",
+	0x12 => "IMS settings service",
+	0x13 => "Analog to digital converter driver service",
+	0x14 => "Core sound driver service",
+	0x15 => "Modem embedded file system service",
+	0x16 => "Time service",
+	0x17 => "Thermal sensors service",
+	0x18 => "Thermal mitigation device service",
+	0x19 => "Service access proxy service",
+	0x1a => "Wireless data administrative service",
+	0x1b => "TSYNC control service ",
+	0x1c => "Remote file system access service",
+	0x1d => "Circuit switched videotelephony service",
+	0x1e => "Qualcomm mobile access point service",
+	0x1f => "IMS presence service",
+	0x20 => "IMS videotelephony service",
+	0x21 => "IMS application service",
+	0x22 => "Coexistence service",
+	0x23 => "Reserved",
+	0x24 => "Persistent device configuration service",
+	0x25 => "Reserved",
+	0x26 => "Simultaneous transmit service",
+	0x27 => "Bearer independent transport service",
+	0x28 => "IMS RTP service",
+	0x29 => "RF radiated performance enhancement service",
+	0x2a => "Data system determination service",
+	0x2b => "Subsystem control service",
+	0xe0 => "Card application toolkit service",
+	0xe1 => "Remote management service",
+    );
 
 # $tlvs = { type1 => packdata, type2 => packdata, .. 
 sub mk_qmi {
@@ -330,8 +402,7 @@ sub qmiver {
     print "supports $n QMI subsystems:\n";
     for (my $i = 0; $i < $n; $i++) {
 	my ($sys, $maj, $min) = unpack("Cvv", $data);
-	my $system = $sysname{$sys} || sprintf("%#04x", $sys);
-	print "  $system ($maj.$min)\n";
+	printf "  0x%02x ($maj.$min)\t'%s'\t- %s\n", $sys, $sysname{$sys} || 'unknown', $sysdescr{$sys} || '';
 	$data = substr($data, 5);
     }
 }
