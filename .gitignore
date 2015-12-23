@@ -3,3 +3,8 @@
 src/wwan_ctl
 qcqmifs
 src/cuseqmi
+\#*\#
+src/flush-wdm
+src/libusbopen
+src/swi-firmware
+src/swi-sdk-firmware
