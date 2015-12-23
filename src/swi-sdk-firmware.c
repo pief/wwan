@@ -19,16 +19,13 @@
 static char *sdkpath = __stringify(SDK_EXE);
 char devmode;
 
-void get_img_info(char *imgpath)
+void get_img_info()
 {
     CurrentImgList     CurrImgList;
     CurrImageInfo      currImgInfo[5];
     BYTE               numEntries  = 5;
     int i, ret;
 
-    printf("bar\n");
-    if (strlen(imgpath))
-	    printf("foo\n");
     memset( (void *)&CurrImgList, 0, sizeof( CurrImgList ) );
     memset( (void *)&currImgInfo, 0, sizeof( currImgInfo ) );
     CurrImgList.pCurrImgInfo = currImgInfo;
@@ -62,7 +59,7 @@ int start_sdk()
     struct device_info dev[3], *pdev;
     
     /* Set SDK image path */
-    printf("setting sdk path to %s\n",  sdkpath);
+    fprintf(stderr, "setting sdk path to %s\n",  sdkpath);
     rc = SetSDKImagePath(sdkpath);
     if (rc)
 	    return rc;
@@ -89,11 +86,20 @@ int start_sdk()
     return rc;
 }
 
+void stop_sdk()
+{
+	    QCWWANDisconnect();
+	    SLQSKillSDKProcess();
+}
 
 int main(int argc, char *argv[])
 {
-	printf("argc=%d\n", argc);
+	int i;
+
+	for (i = 1; i < argc; i++)
+		printf("argv[%d]=%s ", i, argv[i]);
 	start_sdk();
-	get_img_info(argv[1]);
+	get_img_info();
+	stop_sdk();
 	return 0;
 }
