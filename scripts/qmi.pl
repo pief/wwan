@@ -4,15 +4,58 @@ use strict;
 use warnings;
 use Data::Dumper;
 
+# table recreated from GobiAPI_2013-07-31-1347/GobiConnectionMgmt/GobiConnectionMgmtAPIEnums.h
+# perl -e 'while (<>){ if (m!eQMI_SVC_([^,]*),\s*//\s*(\d+)\s(.*)!) { my $svc = $1; my $num = $2; my $descr = $3; printf "\tQMI_$svc\t => 0x%02x,\t# $descr\n", $num; } }' < /tmp/xx
+#
+# manually corrected QMI_CONTROL => QMI_CTL
+
 use constant {
-    QMI_CTL => 0x00,
-    QMI_WDS => 0x01,
-    QMI_DMS => 0x02,
-    QMI_NAS => 0x03,
-    QMI_WMS => 0x05,
-    QMI_PDS => 0x06,
-    QMI_UIM => 0x0B,
-    QMI_LOC => 0x10,
+	QMI_CTL	 => 0x00,	# Control service
+	QMI_WDS	 => 0x01,	# Wireless data service
+	QMI_DMS	 => 0x02,	# Device management service
+	QMI_NAS	 => 0x03,	# Network access service
+	QMI_QOS	 => 0x04,	# Quality of service, err, service 
+	QMI_WMS	 => 0x05,	# Wireless messaging service
+	QMI_PDS	 => 0x06,	# Position determination service
+	QMI_AUTH	 => 0x07,	# Authentication service
+	QMI_AT	 => 0x08,	# AT command processor service
+	QMI_VOICE	 => 0x09,	# Voice service
+	QMI_CAT2	 => 0x0a,	# Card application toolkit service (new)
+	QMI_UIM	 => 0x0b,	# UIM service
+	QMI_PBM	 => 0x0c,	# Phonebook service
+	QMI_QCHAT	 => 0x0d,	# QCHAT Service
+	QMI_RMTFS	 => 0x0e,	# Remote file system service
+	QMI_TEST	 => 0x0f,	# Test service
+	QMI_LOC	 => 0x10,	# Location service 
+	QMI_SAR	 => 0x11,	# Specific absorption rate service
+	QMI_IMSS	 => 0x12,	# IMS settings service
+	QMI_ADC	 => 0x13,	# Analog to digital converter driver service
+	QMI_CSD	 => 0x14,	# Core sound driver service
+	QMI_MFS	 => 0x15,	# Modem embedded file system service
+	QMI_TIME	 => 0x16,	# Time service
+	QMI_TS	 => 0x17,	# Thermal sensors service
+	QMI_TMD	 => 0x18,	# Thermal mitigation device service
+	QMI_SAP	 => 0x19,	# Service access proxy service
+	QMI_WDA	 => 0x1a,	# Wireless data administrative service
+	QMI_TSYNC	 => 0x1b,	# TSYNC control service 
+	QMI_RFSA	 => 0x1c,	# Remote file system access service
+	QMI_CSVT	 => 0x1d,	# Circuit switched videotelephony service
+	QMI_QCMAP	 => 0x1e,	# Qualcomm mobile access point service
+	QMI_IMSP	 => 0x1f,	# IMS presence service
+	QMI_IMSVT	 => 0x20,	# IMS videotelephony service
+	QMI_IMSA	 => 0x21,	# IMS application service
+	QMI_COEX	 => 0x22,	# Coexistence service
+	QMI_RESERVED_35	 => 0x23,	# Reserved
+	QMI_PDC	 => 0x24,	# Persistent device configuration service
+	QMI_RESERVED_37	 => 0x25,	# Reserved
+	QMI_STX	 => 0x26,	# Simultaneous transmit service
+	QMI_BIT	 => 0x27,	# Bearer independent transport service
+	QMI_IMSRTP	 => 0x28,	# IMS RTP service
+	QMI_RFRPE	 => 0x29,	# RF radiated performance enhancement service
+	QMI_DSD	 => 0x2a,	# Data system determination service
+	QMI_SSCTL	 => 0x2b,	# Subsystem control service
+	QMI_CAT	 => 0xe0,	# Card application toolkit service
+	QMI_RMS	 => 0xe1,	# Remote management service
 };
 
 
@@ -970,15 +1013,58 @@ use Getopt::Long;
 use LWP::Simple;
 use Socket;
 
+# recreated using
+#
+# perl -e 'while (<>){ if (m!eQMI_SVC_([^,]*),\s*//\s*(\d+)\s(.*)!) { my $svc = $1; $svc = "CTL" if ($svc eq "CONTROL"); my $num = $2; my $descr = $3; printf "\t0x%02x => \"QMI_$svc\",\t# $descr\n", $num; } }' < /tmp/xx
+
+
 my %sysname = (
-    0 => "QMI_CTL",
-    1 => "QMI_WDS",
-    2 => "QMI_DMS",
-    3 => "QMI_NAS",
-    5 => "QMI_WMS",
-    6 => "QMI_PDS",
-    0xB => "QMI_UIM",
-    0x10 => "QMI_LOC",
+	0x00 => "QMI_CTL",	# Control service
+	0x01 => "QMI_WDS",	# Wireless data service
+	0x02 => "QMI_DMS",	# Device management service
+	0x03 => "QMI_NAS",	# Network access service
+	0x04 => "QMI_QOS",	# Quality of service, err, service 
+	0x05 => "QMI_WMS",	# Wireless messaging service
+	0x06 => "QMI_PDS",	# Position determination service
+	0x07 => "QMI_AUTH",	# Authentication service
+	0x08 => "QMI_AT",	# AT command processor service
+	0x09 => "QMI_VOICE",	# Voice service
+	0x0a => "QMI_CAT2",	# Card application toolkit service (new)
+	0x0b => "QMI_UIM",	# UIM service
+	0x0c => "QMI_PBM",	# Phonebook service
+	0x0d => "QMI_QCHAT",	# QCHAT Service
+	0x0e => "QMI_RMTFS",	# Remote file system service
+	0x0f => "QMI_TEST",	# Test service
+	0x10 => "QMI_LOC",	# Location service 
+	0x11 => "QMI_SAR",	# Specific absorption rate service
+	0x12 => "QMI_IMSS",	# IMS settings service
+	0x13 => "QMI_ADC",	# Analog to digital converter driver service
+	0x14 => "QMI_CSD",	# Core sound driver service
+	0x15 => "QMI_MFS",	# Modem embedded file system service
+	0x16 => "QMI_TIME",	# Time service
+	0x17 => "QMI_TS",	# Thermal sensors service
+	0x18 => "QMI_TMD",	# Thermal mitigation device service
+	0x19 => "QMI_SAP",	# Service access proxy service
+	0x1a => "QMI_WDA",	# Wireless data administrative service
+	0x1b => "QMI_TSYNC",	# TSYNC control service 
+	0x1c => "QMI_RFSA",	# Remote file system access service
+	0x1d => "QMI_CSVT",	# Circuit switched videotelephony service
+	0x1e => "QMI_QCMAP",	# Qualcomm mobile access point service
+	0x1f => "QMI_IMSP",	# IMS presence service
+	0x20 => "QMI_IMSVT",	# IMS videotelephony service
+	0x21 => "QMI_IMSA",	# IMS application service
+	0x22 => "QMI_COEX",	# Coexistence service
+	0x23 => "QMI_RESERVED_35",	# Reserved
+	0x24 => "QMI_PDC",	# Persistent device configuration service
+	0x25 => "QMI_RESERVED_37",	# Reserved
+	0x26 => "QMI_STX",	# Simultaneous transmit service
+	0x27 => "QMI_BIT",	# Bearer independent transport service
+	0x28 => "QMI_IMSRTP",	# IMS RTP service
+	0x29 => "QMI_RFRPE",	# RF radiated performance enhancement service
+	0x2a => "QMI_DSD",	# Data system determination service
+	0x2b => "QMI_SSCTL",	# Subsystem control service
+	0xe0 => "QMI_CAT",	# Card application toolkit service
+	0xe1 => "QMI_RMS",	# Remote management service
     );
 
 ### functions used during enviroment variable parsing ###
@@ -997,6 +1083,7 @@ Where [options] are
   --[no]verbose
   --[no]debug
   --system=<sysname|number>
+  --cid=<cid> (not released)
   --monitor
 
 Command is either a hex command number or an alias
@@ -1036,6 +1123,9 @@ my $debug = 0;
 # defaulting to QMI_WDS operations
 my $system = QMI_WDS;
 
+# CID is undefined by default
+my $xcid;
+
 # sleep and read all rcvd messages?
 my $monitor = 0;
 
@@ -1054,6 +1144,7 @@ GetOptions(
     'verbose!' => \$verbose,
     'debug!' => \$debug,
     'system=s' => \$system,
+    'cid=i' => \$xcid,
     'monitor!' => \$monitor,
     ) || &usage;
 
@@ -1087,6 +1178,8 @@ my $dev = $ENV{MGMT} || '';		# management device
 my @cid;		# array of allocated CIDs
 my $tid = 1;		# transaction id
 my $wds_handle;		# connection handle
+
+$cid[$system] = $xcid if $xcid;
 
 # translation tables
 my %err = (
@@ -1519,6 +1612,7 @@ restart:
 # release all CIDs with the possible exception of QMI_WDS if we started a connection
 sub release_cids {
     for (my $sys = 0; $sys < scalar @cid; $sys++) {
+	next if ($sys == $system && defined($xcid));
 	if ($cid[$sys]) {
 	    if ($wds_handle && $sys == QMI_WDS) {
 		warn "$netdev: not releasing QMI_WDS cid=$cid[$sys] while connected\n" if $verbose;
