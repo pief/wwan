@@ -16,6 +16,7 @@ use Time::HiRes qw (sleep);
 my $maxctrl = 4096; # default, will be overridden by ioctl if supported
 my $mgmt = "/dev/cdc-wdm0";
 my $reset;
+my $usbreset;
 my $debug;
 my $verbose = 1;
 my $usbcomp;
@@ -32,6 +33,7 @@ GetOptions(
     'usbcomp=i' => \$usbcomp,
     'device=s' => \$mgmt,
     'reset!' => \$reset,
+    'usbreset!' => \$usbreset,
     'debug!' => \$debug,
     'verbose!' => \$verbose,
     'help|h|?' => \&usage,
@@ -476,7 +478,7 @@ my %comps = (
 # verify that the $mgmt device is a chardev provided by the cdc_mbim driver
 my ($mode, $rdev) = (stat($mgmt))[2,6];
 die "'$mgmt' is not a character device\n" unless S_ISCHR($mode);
-my $driver = basename(readlink(sprintf("/sys/dev/char/%u:%u/device/driver", $rdev >> 8, $rdev & 0xff)));
+my $driver = basename(readlink(sprintf("/sys/dev/char/%u:%u/device/driver",  &major($rdev), &minor($rdev))));
 if ($driver eq "qmi_wwan") {
     $mbim = undef;
 } elsif ($driver ne "cdc_mbim") {
@@ -605,6 +607,55 @@ if (!&do_qmi(0x555c, &mk_qmi(2, $dmscid, 0x555c, { 0x01 => pack("C", $usbcomp)})
 
 &quit;
 
+sub _slurp {
+    my $f = shift;
+    local $/ = undef;
+    open(X, $f) || return '';
+    my $ret = <X>;
+    close(X);
+    $ret =~ tr/\n//d;
+    return $ret;
+}
+
+sub major
+{
+    my $dev = shift;
+    return ($dev & 0xfff00) >> 8;
+}
+
+sub minor
+{
+    my $dev = shift;
+    return ($dev & 0xff) | (($dev >> 12) & 0xfff00);
+}
+
+# attempt to reset USB device using devio ioctl
+sub usbreset {
+    require 'sys/ioctl.ph';
+    eval 'sub IOCTL_USBDEVFS_RESET () { &_IO(ord(\'U\'), 20); }' unless defined(&IOCTL_USBDEVFS_RESET);
+
+    # need to find the correct usbdevfs device - this is a bit awkward
+    my $rdev = (stat($mgmt))[6];
+    my $dev = sprintf("/sys/dev/char/%u:%u/device/..", &major($rdev), &minor($rdev));
+    my $devnode = sprintf("/dev/bus/usb/%03u/%03u", &_slurp("$dev/busnum"), &_slurp("$dev/devnum"));
+
+    # this is another one!
+    $rdev = (stat($devnode))[6];
+
+    # something wrong
+    return unless $rdev;
+
+    # verify that we got the right one
+    return if (&_slurp("$dev/dev") ne sprintf("%u:%u", &major($rdev), &minor($rdev)));
+
+    my $foo = 0;
+    open(X, ">$devnode") || return;
+    if (!ioctl(X, &IOCTL_USBDEVFS_RESET, $foo)) {
+	warn("ioctl failed: $!\n") if $debug;
+    }
+    close(X);
+}
+
 sub quit {
     if ($dmscid) {
 	# reset device? DMS_SET_OPERATING_MODE => RESET
@@ -632,7 +683,10 @@ sub quit {
 
     # dump all messages received
     print Dumper($msgs) if $debug;
-    
+
+    # attempt to reset USB device
+    &usbreset if ($usbreset);
+
     exit 0; # will exit parent
 }
     
@@ -644,6 +698,7 @@ Where [options] are
   --device=<dev>        use <dev> for MBIM or QMI commands (default: '$mgmt')
   --usbcomp=<num>	change USB composition setting
   --reset		issue a QMI reset request
+  --usbreset		USB device reset - might be necessary for MC74xx
   --debug		enable verbose debug output
   --help		this help text
 
