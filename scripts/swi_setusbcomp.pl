@@ -609,7 +609,7 @@ sub quit {
     if ($dmscid) {
 	# reset device? DMS_SET_OPERATING_MODE => RESET
 	if ($reset) {
-	    &do_qmi(0x0023, &mk_qmi(2, $dmscid, 0x002e, { 0x01 =>  pack("C", 4)}));
+	    &do_qmi(0x002e, &mk_qmi(2, $dmscid, 0x002e, { 0x01 =>  pack("C", 4)}));
 	}
 
 	# release DMS CID
