@@ -641,15 +641,24 @@ sub usbreset {
     $rdev = (stat($devnode))[6];
 
     # something wrong
-    return unless $rdev;
+    unless ($rdev) {
+	print "ERROR: unable to stat '$devnode'\n";
+	return;
+    }
 
     # verify that we got the right one
-    return if (&_slurp("$dev/dev") ne sprintf("%u:%u", &major($rdev), &minor($rdev)));
+    if (&_slurp("$dev/dev") ne sprintf("%u:%u", &major($rdev), &minor($rdev))) {
+	print "ERROR: '$devnode' and '$mgmt' belong to different devices!\n";
+	return;
+    }
 
     my $foo = 0;
-    open(X, ">$devnode") || return;
+    unless (open(X, ">$devnode")) {
+	print "ERROR: cannot open '$devnode': $!\n";
+	return;
+    }
     if (!ioctl(X, &IOCTL_USBDEVFS_RESET, $foo)) {
-	warn("ioctl failed: $!\n") if $debug;
+	print "USBDEVFS_RESET ioctl failed: $!\n";
     }
     close(X);
 }
