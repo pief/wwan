@@ -4,13 +4,11 @@
 
 use strict;
 use warnings;
-use Data::Dumper;
 use Getopt::Long;
 use UUID::Tiny ':std';
 use IPC::Shareable;
 use Fcntl ':mode';
 use File::Basename;
-use JSON;
 use Time::HiRes qw (sleep);
 
 my $maxctrl = 4096; # default, will be overridden by ioctl if supported
